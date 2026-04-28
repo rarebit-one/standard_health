@@ -1,0 +1,46 @@
+name: Debug OIDC
+
+# Temporary diagnostic workflow. Triggers manually, mints an OIDC token
+# for audience rubygems.org (same as the release publish job), and prints
+# the decoded claims so we can compare them to the RubyGems trusted
+# publisher config. Delete this file once the publish flow works.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Mint OIDC token and print claims
+        run: |
+          set -eu
+          TOKEN=$(curl -sL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rubygems.org" \
+            | python3 -c "import sys, json; print(json.load(sys.stdin)['value'])")
+
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+          # base64url -> base64 (replace _- with /+) and pad to multiple of 4
+          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
+          if [ $PAD -ne 0 ]; then PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PAD))"; fi
+          DECODED=$(echo "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null)
+
+          echo "::group::Full decoded OIDC claims"
+          echo "$DECODED" | python3 -m json.tool
+          echo "::endgroup::"
+
+          echo "::group::Fields RubyGems matches against"
+          echo "$DECODED" | python3 -c "
+          import sys, json
+          c = json.load(sys.stdin)
+          for k in ('repository', 'repository_owner', 'repository_owner_id',
+                    'workflow', 'workflow_ref', 'job_workflow_ref',
+                    'environment', 'event_name', 'ref', 'sub'):
+              print(f'{k}: {c.get(k)}')
+          "
+          echo "::endgroup::"
