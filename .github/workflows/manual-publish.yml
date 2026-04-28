@@ -1,0 +1,46 @@
+name: Manual Publish (bootstrap)
+
+# One-shot publish path that uses an API key from the RUBYGEMS_API_KEY secret.
+# Use this only to bootstrap the gem when trusted-publisher OIDC isn't yet
+# wired up (or is misbehaving). After the gem is live on RubyGems and a
+# regular Trusted Publisher is registered against it, delete this workflow
+# and rotate the API key.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to build and publish (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.4
+          bundler-cache: true
+
+      - name: Configure RubyGems credentials
+        env:
+          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        run: |
+          install -m 700 -d ~/.gem
+          install -m 600 /dev/null ~/.gem/credentials
+          printf -- "---\n:rubygems_api_key: %s\n" "$RUBYGEMS_API_KEY" > ~/.gem/credentials
+
+      - name: Build gem
+        run: gem build standard_health.gemspec
+
+      - name: Push to RubyGems
+        run: gem push standard_health-*.gem
