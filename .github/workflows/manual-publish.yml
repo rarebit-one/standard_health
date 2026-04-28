@@ -1,17 +1,14 @@
 name: Manual Publish (bootstrap)
 
-# One-shot publish path that bypasses the reusable release workflow's
-# Sigstore attestation step. Attestation has a known verifier bug for
-# reusable workflows (cert SAN has reusable's tag, verifier expects
-# consuming gem's tag), and the patch's "retry without attestation"
-# fallback only handles local sign failures, not server-side rejection.
+# One-shot publish using a RUBYGEMS_API_KEY secret. We can't use the
+# reusable-gem-release workflow because its attestation step has a
+# verifier bug for reusable workflows. We can't use a thin OIDC-only
+# inline workflow either, because that would require its own pending
+# trusted publisher (filename mismatch with the existing one).
 #
-# Trusted publisher OIDC exchange still happens (via
-# configure-rubygems-credentials) — no API key needed. After v0.1.0 lands
-# on RubyGems, a regular trusted publisher can be registered against the
-# gem itself and v0.1.1+ can ride the reusable workflow normally.
-#
-# Delete this file once the gem is published.
+# Bootstrap with API key, register a regular trusted publisher against
+# the published gem, then v0.1.1+ uses the reusable workflow normally.
+# Delete this file once the gem is on RubyGems.
 
 on:
   workflow_dispatch:
@@ -25,10 +22,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: rubygems
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -40,11 +35,16 @@ jobs:
           ruby-version: 3.4.4
           bundler-cache: true
 
-      - name: Configure RubyGems credentials via OIDC
-        uses: rubygems/configure-rubygems-credentials@bc6dd217f8a4f919d6835fcfefd470ef821f5c44 # v1.0.0
+      - name: Configure RubyGems credentials
+        env:
+          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        run: |
+          install -m 700 -d ~/.gem
+          install -m 600 /dev/null ~/.gem/credentials
+          printf -- "---\n:rubygems_api_key: %s\n" "$RUBYGEMS_API_KEY" > ~/.gem/credentials
 
       - name: Build gem
         run: gem build standard_health.gemspec
 
-      - name: Push gem (attestation skipped)
+      - name: Push to RubyGems
         run: gem push standard_health-*.gem
