@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.4
+          bundler-cache: true
+
+      - name: Lint code for consistent style
+        run: bundle exec rubocop -f github
+
+      - name: Scan for vulnerable gems
+        run: bundle exec bundler-audit --update
+
+  test-matrix:
+    name: test (${{ matrix.ruby }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.4.4"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Run tests
+        env:
+          RAILS_ENV: test
+        run: bundle exec rspec
+
+  # Aggregator that fans in the matrix into a single required status check.
+  # Branch protection on `main` requires a check literally named "test"; matrix
+  # jobs publish "test (3.4.4)" etc. which don't match. This job depends on
+  # every matrix leg and succeeds only when they all do.
+  test:
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "All Ruby matrix legs passed"
