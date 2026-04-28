@@ -25,22 +25,39 @@ jobs:
             | python3 -c "import sys, json; print(json.load(sys.stdin)['value'])")
 
           PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
-          # base64url -> base64 (replace _- with /+) and pad to multiple of 4
           PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
           if [ $PAD -ne 0 ]; then PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PAD))"; fi
           DECODED=$(echo "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null)
 
-          echo "::group::Full decoded OIDC claims"
+          echo "::group::Decoded OIDC claims"
           echo "$DECODED" | python3 -m json.tool
           echo "::endgroup::"
 
-          echo "::group::Fields RubyGems matches against"
-          echo "$DECODED" | python3 -c "
-          import sys, json
-          c = json.load(sys.stdin)
-          for k in ('repository', 'repository_owner', 'repository_owner_id',
-                    'workflow', 'workflow_ref', 'job_workflow_ref',
-                    'environment', 'event_name', 'ref', 'sub'):
-              print(f'{k}: {c.get(k)}')
-          "
+          # Save token for next step
+          echo "$TOKEN" > /tmp/oidc_token
+
+      - name: Probe RubyGems trusted-publisher exchange
+        run: |
+          set -eu
+          TOKEN=$(cat /tmp/oidc_token)
+
+          echo "::group::Trying audience=rubygems.org with gem standard_health"
+          curl -isS -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"gem":"standard_health"}' \
+            'https://rubygems.org/api/v1/oidc/trusted_publisher/exchange' || true
+          echo
+          echo "::endgroup::"
+
+          echo "::group::Trying without body"
+          curl -isS -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            'https://rubygems.org/api/v1/oidc/trusted_publisher/exchange' || true
+          echo
+          echo "::endgroup::"
+
+          echo "::group::Listing endpoints (smoke)"
+          curl -isS 'https://rubygems.org/api/v1/oidc/trusted_publisher' || true
+          echo
           echo "::endgroup::"
