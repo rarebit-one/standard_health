@@ -1,10 +1,17 @@
 name: Manual Publish (bootstrap)
 
-# One-shot publish path that uses an API key from the RUBYGEMS_API_KEY secret.
-# Use this only to bootstrap the gem when trusted-publisher OIDC isn't yet
-# wired up (or is misbehaving). After the gem is live on RubyGems and a
-# regular Trusted Publisher is registered against it, delete this workflow
-# and rotate the API key.
+# One-shot publish path that bypasses the reusable release workflow's
+# Sigstore attestation step. Attestation has a known verifier bug for
+# reusable workflows (cert SAN has reusable's tag, verifier expects
+# consuming gem's tag), and the patch's "retry without attestation"
+# fallback only handles local sign failures, not server-side rejection.
+#
+# Trusted publisher OIDC exchange still happens (via
+# configure-rubygems-credentials) — no API key needed. After v0.1.0 lands
+# on RubyGems, a regular trusted publisher can be registered against the
+# gem itself and v0.1.1+ can ride the reusable workflow normally.
+#
+# Delete this file once the gem is published.
 
 on:
   workflow_dispatch:
@@ -18,8 +25,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: rubygems
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -31,16 +40,11 @@ jobs:
           ruby-version: 3.4.4
           bundler-cache: true
 
-      - name: Configure RubyGems credentials
-        env:
-          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
-        run: |
-          install -m 700 -d ~/.gem
-          install -m 600 /dev/null ~/.gem/credentials
-          printf -- "---\n:rubygems_api_key: %s\n" "$RUBYGEMS_API_KEY" > ~/.gem/credentials
+      - name: Configure RubyGems credentials via OIDC
+        uses: rubygems/configure-rubygems-credentials@bc6dd217f8a4f919d6835fcfefd470ef821f5c44 # v1.0.0
 
       - name: Build gem
         run: gem build standard_health.gemspec
 
-      - name: Push to RubyGems
+      - name: Push gem (attestation skipped)
         run: gem push standard_health-*.gem
