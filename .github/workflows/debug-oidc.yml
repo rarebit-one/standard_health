@@ -41,23 +41,13 @@ jobs:
           set -eu
           TOKEN=$(cat /tmp/oidc_token)
 
-          echo "::group::Trying audience=rubygems.org with gem standard_health"
+          echo "::group::Direct exchange_token call"
+          # Mask the JWT in the printed body but keep response visible.
+          BODY=$(python3 -c "import json,sys; print(json.dumps({'jwt': sys.argv[1]}))" "$TOKEN")
           curl -isS -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"gem":"standard_health"}' \
-            'https://rubygems.org/api/v1/oidc/trusted_publisher/exchange' || true
-          echo
-          echo "::endgroup::"
-
-          echo "::group::Trying without body"
-          curl -isS -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            'https://rubygems.org/api/v1/oidc/trusted_publisher/exchange' || true
-          echo
-          echo "::endgroup::"
-
-          echo "::group::Listing endpoints (smoke)"
-          curl -isS 'https://rubygems.org/api/v1/oidc/trusted_publisher' || true
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            -d "$BODY" \
+            'https://rubygems.org/api/v1/oidc/trusted_publisher/exchange_token' || true
           echo
           echo "::endgroup::"
