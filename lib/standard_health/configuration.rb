@@ -25,6 +25,18 @@ module StandardHealth
     # engine works in API-only host apps without configuration.
     attr_accessor :parent_controller
 
+    # Optional class name of a controller that ONLY `DiagnosticsController`
+    # should inherit from. When set, `HealthController` continues to use
+    # `parent_controller` while `DiagnosticsController` uses this one. Lets
+    # host apps put auth (e.g. HTTP Basic) on the diagnostics endpoint
+    # without needing to set `raise_on_missing_callback_actions = false`
+    # to suppress Rails 7.1's missing-action error caused by a single
+    # parent declaring `before_action :auth, only: :env` for both controllers.
+    #
+    # When unset (the default), `DiagnosticsController` falls back to
+    # `parent_controller` — fully backward-compatible with v0.1.0.
+    attr_accessor :diagnostics_parent_controller
+
     # An optional `StandardHealth::EnvSpec` instance describing required and
     # recommended environment variables for the host app. Audited via the
     # /diagnostics/env endpoint.
@@ -32,6 +44,7 @@ module StandardHealth
 
     def initialize
       @parent_controller = "ActionController::API"
+      @diagnostics_parent_controller = nil
       @env_spec = nil
       @checks = []
     end

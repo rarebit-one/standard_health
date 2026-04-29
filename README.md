@@ -127,6 +127,45 @@ end
 
 For a more granular setup, mount the engine inside an authenticated route block in your host app's `routes.rb`.
 
+### Splitting auth between health and diagnostics
+
+The pattern above hits a snag on Rails 7.1+ when you want to protect *only* `/diagnostics/env`. Both `HealthController` and `DiagnosticsController` inherit from `parent_controller`, so a `before_action :authenticate, only: :env` on that single parent applies to both — and Rails raises `AbstractController::ActionNotFound` because `:env` doesn't exist on `HealthController`.
+
+Pre-v0.2.0 the workaround was to disable the check on the host controller:
+
+```ruby
+class StandardHealthHostController < ActionController::API
+  self.raise_on_missing_callback_actions = false # workaround
+  http_basic_authenticate_with(name: ..., password: ..., only: :env)
+end
+```
+
+From v0.2.0 onwards, point `diagnostics_parent_controller` at a separate base class instead. Only `DiagnosticsController` inherits from it, so the `only: :env` callback no longer leaks onto `HealthController`:
+
+```ruby
+# app/controllers/health_base_controller.rb
+class HealthBaseController < ActionController::API
+end
+
+# app/controllers/diagnostics_base_controller.rb
+class DiagnosticsBaseController < ActionController::API
+  http_basic_authenticate_with(
+    name: ENV.fetch("HEALTH_USER"),
+    password: ENV.fetch("HEALTH_PASS")
+  )
+end
+
+# config/initializers/standard_health.rb
+StandardHealth.configure do |c|
+  c.parent_controller = "HealthBaseController"
+  c.diagnostics_parent_controller = "DiagnosticsBaseController"
+end
+```
+
+Now `/health/alive` and `/health/ready` are unauthenticated (probe-friendly) while `/health/diagnostics/env` requires HTTP Basic — no `raise_on_missing_callback_actions` flag needed.
+
+When `diagnostics_parent_controller` is unset, `DiagnosticsController` falls back to `parent_controller`, matching v0.1.0 behavior exactly.
+
 ## Status semantics
 
 `/ready` returns:
