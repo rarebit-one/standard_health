@@ -14,11 +14,12 @@ RSpec.describe "diagnostics_parent_controller", type: :request do
   def reset_engine_controllers!
     StandardHealth.reset_parent_controller!
     StandardHealth.reset_diagnostics_parent_controller!
-    # Remove engine controller constants and reload Zeitwerk so the next
-    # reference re-evaluates each class body against the current config
-    # (`parent_controller` / `diagnostics_parent_controller`). Without
-    # this, an earlier example's inheritance chain would survive into
-    # the next one and break the superclass match check.
+    # Ruby fixes a class's superclass at definition time, so `class Foo <
+    # parent_controller` is bound once and never re-evaluated. To exercise
+    # different `parent_controller` / `diagnostics_parent_controller`
+    # values across examples, we drop the engine's controller constants
+    # and reload Zeitwerk; the next reference re-runs each class body
+    # against the now-current config and rebinds the superclass.
     %i[
       DiagnosticsController
       HealthController

@@ -125,6 +125,8 @@ StandardHealth.configure do |c|
 end
 ```
 
+> **Note (Rails 7.1+):** the `only: :env` filter above raises `AbstractController::ActionNotFound` because `HealthController` (alive/ready) shares this parent and has no `:env` action. Use [Splitting auth between health and diagnostics](#splitting-auth-between-health-and-diagnostics) instead — that's why v0.2.0 added `diagnostics_parent_controller`.
+
 For a more granular setup, mount the engine inside an authenticated route block in your host app's `routes.rb`.
 
 ### Splitting auth between health and diagnostics
