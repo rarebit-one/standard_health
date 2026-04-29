@@ -69,8 +69,10 @@ The DSL has two declarations:
 
 Both accept:
 
-- `in: %w[staging production]` — restricts the entry to those `APP_ENVIRONMENT` values; ignored otherwise
+- `in: %w[staging production]` — restricts the entry to those `APP_ENVIRONMENT` values; ignored otherwise. May also be a Symbol resolved via `mode_alias` (see below).
 - `description: "..."` — surfaced verbatim in the audit JSON
+- `consumed_by: "config/initializers/sentry.rb"` — pointer (or `Array<String>`) to where the value is read; surfaced verbatim
+- `if: -> { ... }` / `unless: -> { ... }` — Proc predicates evaluated at audit time. When `unless:` returns truthy or `if:` returns falsy, the entry is reported with `status: :not_applicable`
 
 Audit output (one row per applicable entry):
 
@@ -83,7 +85,108 @@ Audit output (one row per applicable entry):
 }
 ```
 
-Possible `status` values are `ok`, `missing` (required + absent), and `should_set` (recommended + absent).
+Possible `status` values are `ok`, `missing` (required + absent), `should_set` (recommended + absent), and `not_applicable` (suppressed by an `if:`/`unless:` predicate).
+
+### Predicates: `if:` and `unless:`
+
+Use predicates when an env var is only meaningful under runtime conditions that aren't expressible as a fixed list of `APP_ENVIRONMENT` values — e.g. when a host app supports a "mock mode" toggle.
+
+```ruby
+required :MYINFO_PRIVATE_JWKS,
+  in: %w[production],
+  unless: -> { ENV["MYINFO_MOCK_MODE"].present? }
+
+recommended :SENTRY_DSN,
+  if: -> { ENV["SENTRY_DISABLED"].blank? }
+```
+
+A suppressed entry surfaces as:
+
+```json
+{
+  "name": "MYINFO_PRIVATE_JWKS",
+  "level": "required",
+  "status": "not_applicable",
+  "reason": "unless predicate matched",
+  "mode": "production"
+}
+```
+
+The `reason` is `"unless predicate matched"` or `"if predicate did not match"`. Both predicates may be combined; the entry only evaluates when `if:` is truthy and `unless:` is falsy.
+
+### Mode aliases: `mode_alias`
+
+Declare reusable groupings of `APP_ENVIRONMENT` values inside the `define` block, then reference them as Symbols in `in:`. Common patterns ship as conventions (not built-ins): `:deployed` for staging-and-up, `:live` for production-only.
+
+```ruby
+StandardHealth::EnvSpec.define do
+  mode_alias :deployed, %w[staging preview production]
+  mode_alias :live,     %w[production]
+
+  required :APP_ENVIRONMENT
+  required :SENTRY_DSN,       in: :deployed
+  required :STRIPE_LIVE_KEY,  in: :live
+end
+```
+
+`in:` accepts:
+
+- `nil` (omitted) — entry always applies
+- `Array<String>` — literal mode list (existing behaviour)
+- `Symbol` — resolved against `mode_alias` at audit time. An undeclared Symbol raises `StandardHealth::EnvSpec::UnknownModeAlias`.
+
+### `description:` and `consumed_by:`
+
+Both flow through to audit rows verbatim. `description:` is a human hint; `consumed_by:` points at the file(s) that read the value, which makes "what does this env var actually do" much faster to answer in incident response.
+
+```ruby
+required :APP_HOST,
+  in: :deployed,
+  description: "Canonical web host",
+  consumed_by: "config/initializers/sentry.rb"
+```
+
+```json
+{
+  "name": "APP_HOST",
+  "level": "required",
+  "status": "ok",
+  "mode": "production",
+  "description": "Canonical web host",
+  "consumed_by": "config/initializers/sentry.rb"
+}
+```
+
+`consumed_by:` may be a String or `Array<String>`; an Array is preserved as a JSON array.
+
+### Groups
+
+Wrap related declarations in a `group "Label" do ... end` block to tag them with a category. Groups are pure metadata — they don't affect applicability, status, or evaluation order.
+
+```ruby
+StandardHealth::EnvSpec.define do
+  group "Singpass / MyInfo" do
+    required :MYINFO_CLIENT_ID
+    required :MYINFO_PRIVATE_JWKS, unless: -> { ENV["MYINFO_MOCK_MODE"].present? }
+  end
+
+  group "Database" do
+    required :DATABASE_URL, in: :deployed
+  end
+end
+```
+
+Audit rows for entries declared inside a `group` block carry a `group` key:
+
+```json
+{ "name": "MYINFO_CLIENT_ID", "level": "required", "status": "ok", "mode": "production", "group": "Singpass / MyInfo" }
+```
+
+Entries declared outside any `group` block omit the `group` key entirely.
+
+### Backward compatibility
+
+All v0.2.0 specs continue to produce identical audit output in v0.3.0. The new fields (`description`, `consumed_by`, `group`, `reason`) appear only when the corresponding feature is used; the new `:not_applicable` status only appears when a predicate suppresses an entry.
 
 ## Custom checks
 
