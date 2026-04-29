@@ -153,6 +153,17 @@ RSpec.describe StandardHealth::EnvSpec do
 
       expect(spec.audit({}, mode: "production").first).to include(status: :missing)
     end
+
+    it "lets a later mode_alias declaration override an earlier one (last writer wins)" do
+      spec = described_class.define do
+        mode_alias :deployed, %w[staging]
+        mode_alias :deployed, %w[staging production]
+        required :APP_HOST, in: :deployed
+      end
+
+      expect(spec.audit({}, mode: "staging").first).to include(name: :APP_HOST, status: :missing)
+      expect(spec.audit({}, mode: "production").first).to include(name: :APP_HOST, status: :missing)
+    end
   end
 
   describe "consumed_by:" do
@@ -220,6 +231,26 @@ RSpec.describe StandardHealth::EnvSpec do
 
       expect(by_name[:IN_A]).to include(group: "A")
       expect(by_name[:OUTSIDE]).not_to have_key(:group)
+    end
+
+    it "uses the innermost label when group blocks are nested" do
+      spec = described_class.define do
+        group "Outer" do
+          group "Inner" do
+            required :NESTED
+          end
+        end
+      end
+
+      audit = spec.audit({}, mode: "production")
+
+      expect(audit.first).to include(name: :NESTED, group: "Inner")
+    end
+
+    it "raises ArgumentError when group is called without a block" do
+      expect do
+        described_class.define { group "Naked" }
+      end.to raise_error(ArgumentError, /group requires a block/)
     end
   end
 end

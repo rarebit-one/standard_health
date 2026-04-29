@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `if:` and `unless:` Proc predicates on `required` and `recommended`. Evaluated at audit time; when `unless:` returns truthy or `if:` returns falsy the entry is reported with `status: :not_applicable` and a `reason` field. Solves the MyInfo mock-mode case where `MYINFO_PRIVATE_JWKS` is only required outside mock mode.
 - `mode_alias` top-level DSL inside `EnvSpec.define`. Maps a Symbol to an `Array<String>` of `APP_ENVIRONMENT` values. `in:` now accepts a Symbol that is resolved against declared aliases at audit time; an undefined Symbol raises `StandardHealth::EnvSpec::UnknownModeAlias`.
 - `consumed_by:` keyword on `required`/`recommended`. Accepts a String or `Array<String>` pointing at where the env var is read in the host app; flows through to audit rows verbatim.
-- `description:` is now surfaced in audit rows (was already accepted in 0.2.0 but suppressed from output).
 - `group "Label" do ... end` block inside `EnvSpec.define`. Tags enclosed entries with a `group` field in their audit rows. Pure metadata for ops UX.
 - New `:not_applicable` value for the `status` field, used when an `if:`/`unless:` predicate suppresses an entry.
 

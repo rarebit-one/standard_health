@@ -161,7 +161,7 @@ required :APP_HOST,
 
 ### Groups
 
-Wrap related declarations in a `group "Label" do ... end` block to tag them with a category. Groups are pure metadata — they don't affect applicability, status, or evaluation order.
+Wrap related declarations in a `group "Label" do ... end` block to tag them with a category. Groups are pure metadata — they don't affect applicability, status, or evaluation order. Nested `group` blocks are supported; the innermost label propagates to enclosed entries. Calling `group` without a block raises `ArgumentError`.
 
 ```ruby
 StandardHealth::EnvSpec.define do

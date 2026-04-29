@@ -77,18 +77,22 @@ module StandardHealth
     # previous value (last writer wins) so layered specs are easy to compose.
     #
     # @param name [Symbol]
-    # @param modes [Array<String, Symbol>]
+    # @param modes [Array<String>]
     def mode_alias(name, modes)
       @mode_aliases[name.to_sym] = Array(modes).map(&:to_s)
     end
 
     # Group subsequent declarations under a label. Pure metadata —
-    # propagated to audit rows as `group:` and otherwise inert.
+    # propagated to audit rows as `group:` and otherwise inert. Nested
+    # `group` blocks are supported; the innermost label is the one that
+    # propagates to enclosed entries.
     #
     # @param label [String]
-    def group(label)
+    def group(label, &block)
+      raise ArgumentError, "group requires a block" unless block
+
       @group_stack.push(label.to_s)
-      yield
+      block.call
     ensure
       @group_stack.pop
     end
@@ -198,13 +202,12 @@ module StandardHealth
       nil
     end
 
+    # Builds the metadata-only portion of an audit row. The caller is
+    # responsible for setting `:status` (and optionally `:reason`) — keeping
+    # status off the base intentionally so a future code path that forgets
+    # to set it produces a missing-key error instead of a silent `nil`.
     def base_row(entry, mode_str)
-      row = {
-        name: entry.name,
-        level: entry.level,
-        status: nil,
-        mode: mode_str
-      }
+      row = { name: entry.name, level: entry.level, mode: mode_str }
       row[:description] = entry.description if entry.description
       row[:consumed_by] = serialize_consumed_by(entry.consumed_by) if entry.consumed_by
       row[:group] = entry.group if entry.group
