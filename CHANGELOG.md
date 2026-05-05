@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-05
+
+### Added
+
+- Consumer-presence detection for `consumed_by:` paths. `audit()` accepts an optional `root:` keyword (host-app root). When given, each entry whose `consumed_by:` is set is checked against the host app's tree, producing a new `consumer:` field on the audit row: `:present` (file exists and references the var via `ENV[...]` or `ENV.fetch(...)`), `:file_missing` (path missing on disk), or `:not_referenced` (file exists but no `ENV` reference). Catches renamed/deleted consumer files, `consumed_by:` typos, and vars declared in env-spec but never actually `ENV.fetch`'d.
+- `DiagnosticsController#env` now passes `Rails.root` automatically, so host apps get the new `consumer:` field with no host-side change.
+- Deprecation metadata on `required` / `recommended`: `deprecated: true`, `sunset_on:` (target removal date), `replacement:` (what to use instead). Surfaced verbatim in audit rows. Lets vars be staged for removal with audit trail.
+
+### Changed
+
+- `Entry` struct extended with `deprecated`, `sunset_on`, `replacement`. Backward-compatible — every 0.3.0 spec produces identical audit output when the new opts aren't used and `root:` isn't passed.
+
 ## [0.3.0] - 2026-04-29
 
 ### Added
