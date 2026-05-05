@@ -31,12 +31,22 @@ module StandardHealth
   #   - `description:` (String, optional) — human-readable hint surfaced
   #     verbatim by `/diagnostics/env`.
   #   - `consumed_by:` (String or Array<String>, optional) — pointer(s) to
-  #     where the value is read in the host app. Surfaced verbatim.
+  #     where the value is read in the host app. Surfaced verbatim. When
+  #     `audit` is called with `root:`, each path is checked for an
+  #     `ENV[...]` / `ENV.fetch(...)` reference to the var; the result is
+  #     reported as `consumer:` in the audit row
+  #     (`:present`, `:file_missing`, or `:not_referenced`).
   #   - `if:` / `unless:` (Proc, optional) — predicates evaluated at audit
   #     time. When `unless:` returns truthy or `if:` returns falsy the entry
   #     is reported with `status: :not_applicable`.
   #   - `group` (String, optional) — set implicitly by enclosing `group`
   #     block; surfaced verbatim.
+  #   - `deprecated:` (Boolean, optional) — flag for staged removal. When
+  #     true, the audit row includes `deprecated: true`.
+  #   - `sunset_on:` (String/Date, optional) — target removal date.
+  #     Surfaced verbatim in audit rows.
+  #   - `replacement:` (String, optional) — what to use instead. Surfaced
+  #     in audit rows.
   class EnvSpec
     # Raised when `in:` references a Symbol that hasn't been declared via
     # `mode_alias`.
@@ -53,6 +63,9 @@ module StandardHealth
       :if_predicate,
       :unless_predicate,
       :group,
+      :deprecated,
+      :sunset_on,
+      :replacement,
       keyword_init: true
     )
 
@@ -119,12 +132,20 @@ module StandardHealth
     #
     # @param env_hash [Hash{String, Symbol => String}] e.g. ENV.to_h
     # @param mode [String, Symbol] current APP_ENVIRONMENT value
+    # @param root [String, Pathname, nil] host app root for resolving
+    #   `consumed_by` paths. When given, each row gains a `consumer:` field:
+    #   `:present` (file exists and references the var),
+    #   `:file_missing` (path does not exist),
+    #   `:not_referenced` (file exists but no `ENV[...]` / `ENV.fetch(...)`
+    #   match for the var). When the entry has no `consumed_by` or `root`
+    #   is nil, the field is omitted.
     # @return [Array<Hash>] one row per applicable entry. Each row has at
     #   least `name`, `level`, `status`, `mode`. When an entry is suppressed
     #   by an `if:`/`unless:` predicate, `status` is `:not_applicable` and a
-    #   `reason` field explains why. `description`, `consumed_by`, and
-    #   `group` are included when set on the entry.
-    def audit(env_hash, mode:)
+    #   `reason` field explains why. `description`, `consumed_by`, `group`,
+    #   `deprecated`, `sunset_on`, `replacement`, and `consumer` are
+    #   included when set on the entry / computed during audit.
+    def audit(env_hash, mode:, root: nil)
       mode_str = mode.to_s
       env = stringify(env_hash)
 
@@ -142,6 +163,9 @@ module StandardHealth
           row[:status] = classify(entry, value)
         end
 
+        consumer_status = consumer_state(entry, root)
+        row[:consumer] = consumer_status if consumer_status
+
         out << row
       end
     end
@@ -158,7 +182,10 @@ module StandardHealth
         consumed_by: normalize_consumed_by(opts[:consumed_by]),
         if_predicate: opts[:if],
         unless_predicate: opts[:unless],
-        group: @group_stack.last
+        group: @group_stack.last,
+        deprecated: opts[:deprecated] ? true : nil,
+        sunset_on: opts[:sunset_on],
+        replacement: opts[:replacement]
       )
     end
 
@@ -211,7 +238,45 @@ module StandardHealth
       row[:description] = entry.description if entry.description
       row[:consumed_by] = serialize_consumed_by(entry.consumed_by) if entry.consumed_by
       row[:group] = entry.group if entry.group
+      row[:deprecated] = true if entry.deprecated
+      row[:sunset_on] = entry.sunset_on.to_s if entry.sunset_on
+      row[:replacement] = entry.replacement if entry.replacement
       row
+    end
+
+    # Resolve the consumer-presence state for an entry. Returns nil when
+    # we have nothing to check (no root, no consumed_by). Otherwise:
+    #
+    #   :present        — at least one consumed_by path exists AND mentions
+    #                     ENV["VAR"] or ENV.fetch("VAR", ...).
+    #   :file_missing   — every consumed_by path is missing on disk.
+    #   :not_referenced — at least one path exists, but none reference the
+    #                     env var.
+    def consumer_state(entry, root)
+      return nil if root.nil? || entry.consumed_by.nil?
+
+      pattern = env_reference_pattern(entry.name)
+      any_file_present = false
+      any_referenced = false
+
+      entry.consumed_by.each do |relative|
+        path = File.join(root.to_s, relative)
+        next unless File.file?(path)
+
+        any_file_present = true
+        any_referenced = true if File.read(path).match?(pattern)
+      end
+
+      return :file_missing unless any_file_present
+      any_referenced ? :present : :not_referenced
+    end
+
+    # Match ENV["VAR"], ENV['VAR'], ENV[:VAR], ENV.fetch("VAR", ...),
+    # ENV.fetch('VAR', ...), ENV.fetch(:VAR, ...). Word-boundary on the
+    # right so VAR_PREFIX doesn't accidentally match VAR.
+    def env_reference_pattern(name)
+      escaped = Regexp.escape(name.to_s)
+      /ENV(?:\.fetch)?\s*[\[(]\s*[:'"]?#{escaped}\b/
     end
 
     def serialize_consumed_by(value)

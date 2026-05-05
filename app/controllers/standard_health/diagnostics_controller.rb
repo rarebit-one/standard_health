@@ -19,8 +19,9 @@ module StandardHealth
     def env
       spec = StandardHealth.config.env_spec
       mode = ENV["APP_ENVIRONMENT"].to_s
+      root = defined?(Rails) ? Rails.root : nil
 
-      audit = spec ? spec.audit(ENV.to_h, mode: mode) : []
+      audit = spec ? spec.audit(ENV.to_h, mode: mode, root: root) : []
 
       render json: {
         mode: mode,
