@@ -253,4 +253,146 @@ RSpec.describe StandardHealth::EnvSpec do
       end.to raise_error(ArgumentError, /group requires a block/)
     end
   end
+
+  describe "consumer presence (root:)" do
+    let(:tmpdir) { Dir.mktmpdir }
+    after { FileUtils.remove_entry(tmpdir) }
+
+    def write_consumer(relative, body)
+      path = File.join(tmpdir, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, body)
+    end
+
+    it "reports :present when the consumed_by file references the var via ENV.fetch" do
+      write_consumer("config/initializers/truemail.rb", %(ENV.fetch("TRUEMAIL_VERIFIER_EMAIL", "x")))
+      spec = described_class.define do
+        required :TRUEMAIL_VERIFIER_EMAIL, consumed_by: "config/initializers/truemail.rb"
+      end
+
+      audit = spec.audit({ "TRUEMAIL_VERIFIER_EMAIL" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :present)
+    end
+
+    it "reports :present when the file uses ENV[\"VAR\"] subscript syntax" do
+      write_consumer("a.rb", 'ENV["MY_VAR"]')
+      spec = described_class.define { required :MY_VAR, consumed_by: "a.rb" }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :present)
+    end
+
+    it "reports :present when the file uses ENV[:VAR] symbol subscript syntax" do
+      write_consumer("a.rb", "ENV[:MY_VAR]")
+      spec = described_class.define { required :MY_VAR, consumed_by: "a.rb" }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :present)
+    end
+
+    it "reports :not_referenced when the file exists but does not mention the var" do
+      write_consumer("a.rb", '# nothing about ENV["OTHER_VAR"] here')
+      spec = described_class.define { required :MY_VAR, consumed_by: "a.rb" }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :not_referenced)
+    end
+
+    it "reports :file_missing when the consumed_by path does not exist on disk" do
+      spec = described_class.define { required :MY_VAR, consumed_by: "config/missing.rb" }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :file_missing)
+    end
+
+    it "reports :present when at least one of multiple consumed_by paths matches" do
+      write_consumer("a.rb", "# nothing")
+      write_consumer("b.rb", 'ENV.fetch("MY_VAR")')
+      spec = described_class.define { required :MY_VAR, consumed_by: %w[a.rb b.rb] }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :present)
+    end
+
+    it "does not match a longer-named var that shares a prefix" do
+      write_consumer("a.rb", 'ENV.fetch("MY_VAR_PREFIX")')
+      spec = described_class.define { required :MY_VAR, consumed_by: "a.rb" }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).to include(consumer: :not_referenced)
+    end
+
+    it "omits the consumer field when root: is not provided" do
+      spec = described_class.define { required :MY_VAR, consumed_by: "a.rb" }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production")
+
+      expect(audit.first).not_to have_key(:consumer)
+    end
+
+    it "omits the consumer field when consumed_by is not declared" do
+      spec = described_class.define { required :MY_VAR }
+
+      audit = spec.audit({ "MY_VAR" => "x" }, mode: "production", root: tmpdir)
+
+      expect(audit.first).not_to have_key(:consumer)
+    end
+  end
+
+  describe "deprecation metadata" do
+    it "surfaces deprecated: true in the audit row" do
+      spec = described_class.define { required :LEGACY_VAR, deprecated: true }
+
+      audit = spec.audit({ "LEGACY_VAR" => "x" }, mode: "production")
+
+      expect(audit.first).to include(deprecated: true)
+    end
+
+    it "omits deprecated key when not declared" do
+      spec = described_class.define { required :NORMAL_VAR }
+
+      audit = spec.audit({ "NORMAL_VAR" => "x" }, mode: "production")
+
+      expect(audit.first).not_to have_key(:deprecated)
+    end
+
+    it "surfaces sunset_on as a string in the audit row" do
+      spec = described_class.define do
+        required :LEGACY_VAR, deprecated: true, sunset_on: "2026-12-31"
+      end
+
+      audit = spec.audit({ "LEGACY_VAR" => "x" }, mode: "production")
+
+      expect(audit.first).to include(sunset_on: "2026-12-31")
+    end
+
+    it "surfaces replacement in the audit row" do
+      spec = described_class.define do
+        required :LEGACY_VAR, deprecated: true, replacement: "Use NEW_VAR instead"
+      end
+
+      audit = spec.audit({ "LEGACY_VAR" => "x" }, mode: "production")
+
+      expect(audit.first).to include(replacement: "Use NEW_VAR instead")
+    end
+
+    it "treats deprecated: false / nil as undeclared" do
+      spec = described_class.define do
+        required :A, deprecated: false
+        required :B, deprecated: nil
+      end
+
+      audit = spec.audit({ "A" => "x", "B" => "x" }, mode: "production")
+
+      expect(audit[0]).not_to have_key(:deprecated)
+      expect(audit[1]).not_to have_key(:deprecated)
+    end
+  end
 end
