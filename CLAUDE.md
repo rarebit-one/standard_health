@@ -40,3 +40,15 @@ See the `/worktree` and `/start` skills for full conventions.
 - Specs live under `spec/standard_health/` mirroring the lib layout.
 - The aggregator must never raise — wrap each check in `safe_run`.
 - Host-app auth is the host app's responsibility. The engine exposes `parent_controller` as the seam.
+
+## Consumers
+
+This gem is consumed by all three web apps in the workspace:
+
+| App | Constraint | Style |
+|---|---|---|
+| `fundbright-web` | `~> 0.4` | rubygems |
+| `luminality-web` | `~> 0.4` | rubygems |
+| `nutripod-web` | `~> 0.4` | rubygems |
+
+After publishing a new version via `/publish-gem`, roll it out with the workspace-level `/rollout-gem standard_health [<version>]` skill. Keep this list in sync with the consumer matrix in `<workspace>/.claude/skills/rollout-gem/SKILL.md`.
