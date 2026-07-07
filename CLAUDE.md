@@ -15,7 +15,7 @@ git worktree add .worktrees/<name> -b <branch-name> "origin/$DEFAULT_BRANCH"
 
 Then work inside `.worktrees/<name>/` for the rest of the session.
 
-**Naming:** Use the Linear issue identifier if available (e.g., `.worktrees/<identifier>`), a task slug (e.g., `.worktrees/fix-auth-timeout`), or today's date (e.g., `.worktrees/2026-04-01`) as fallback.
+**Naming:** Use a task slug (e.g., `.worktrees/fix-auth-timeout`) or today's date (e.g., `.worktrees/2026-04-01`) as fallback.
 
 See the `/worktree` and `/start` skills for full conventions.
 
@@ -38,7 +38,9 @@ See the `/worktree` and `/start` skills for full conventions.
 
 - Every Ruby file starts with `# frozen_string_literal: true`.
 - Specs live under `spec/standard_health/` mirroring the lib layout.
-- The aggregator must never raise — wrap each check in `safe_run`.
+- The aggregator must never raise — wrap each check in `safe_run` (the full
+  never-raise contract + status roll-up is the auto-loaded rule
+  `.claude/rules/never-raise.md`, which binds when the aggregator/checks are edited).
 - Host-app auth is the host app's responsibility. The engine exposes `parent_controller` as the seam.
 
 ## Consumers
