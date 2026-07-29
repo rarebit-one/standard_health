@@ -25,9 +25,30 @@ module StandardHealth
 
       render json: {
         mode: mode,
+        status: audit_status(audit),
         audit: audit,
         generated_at: Time.now.utc.iso8601
       }
+    end
+
+    private
+
+    # Top-level verdict so a caller can gate on ONE field instead of
+    # re-implementing the roll-up over `audit`.
+    #
+    #   :ok         — nothing required is missing
+    #   :incomplete — at least one `required` var is missing
+    #
+    # ADDITIVE ONLY in 0.4.1: the endpoint still returns 200 either way, so
+    # nothing that asserts on the status code breaks. That is the point —
+    # it gives monitors a release in which to migrate onto this field before
+    # 0.5.0 makes `:incomplete` a 503. Without the migration window, turning
+    # the code non-200 would silently redden every existing caller.
+    def audit_status(audit)
+      incomplete = Array(audit).any? do |row|
+        row[:level].to_s == "required" && row[:status].to_s == "missing"
+      end
+      incomplete ? :incomplete : :ok
     end
   end
 end

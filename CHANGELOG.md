@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-29
+
+Observability release. Until now the gem emitted **nothing** — no events, no
+logs, no metrics. It computed `latency_ms` for every check and discarded it
+into the response body. A failing check was invisible unless somebody happened
+to call `/ready` at the right moment, so there was no history, no alerting
+hook, and no way to chart check latency.
+
+Everything here is **additive**: no status code, roll-up rule, or response
+field changes meaning, so this is a pure `bundle update` for consumers on
+`~> 0.4`.
+
+### Added
+
+- **Instrumentation.** Three events over whichever bus is live (`Rails.event`
+  on Rails 8.1+, `ActiveSupport::Notifications` otherwise), matching
+  `standard_circuit`'s `EventEmitter` idiom:
+  - `standard_health.check.completed` — `name`, `critical`, `status`,
+    `latency_ms`, `error_class`, `error_message`
+  - `standard_health.check.timed_out` — `name`, `critical`, `timeout_s`
+  - `standard_health.ready.evaluated` — `status`, `duration_ms`, `failed[]`
+- **Three built-in subscribers**, registered by a new engine initializer
+  (`after: :load_config_initializers`, so host config is final):
+  - `Notifiers::Logger` — **silent while healthy.** `warn` on degraded,
+    `error` on unavailable. Health events are polls (~6/min/instance), not
+    transitions; a line per evaluation is ~8,640/day/instance of "everything
+    is fine".
+  - `Notifiers::Sentry` — **transition-only**, with a 60s repeat floor and
+    one `info` on recovery. Capturing every non-ok poll would turn a
+    five-minute outage into ~30 duplicate issues. Mutex-guarded (Puma is
+    threaded). Sentry stays a soft dependency.
+  - `Notifiers::Metrics` — per-poll counters and latency distributions. This
+    fires on every evaluation on purpose: it is what makes `latency_ms`
+    chartable.
+- `config.add_notifier` for host-supplied `call(event_name, payload)`
+  subscribers, validated at add time.
+- Config: `instrumentation_enabled`, `logger`, `sentry_enabled`,
+  `metric_prefix`.
+- **Per-check timeout machinery** — `default_check_timeout`,
+  `total_check_budget`, and a `timeout:` option on `register_check`. Uses a
+  dedicated `StandardHealth::CheckTimeout` rather than bare `Timeout::Error`,
+  so a timeout the host raised for its own reasons is never mislabelled as
+  ours. **All default to `nil` (OFF)** — see below.
+- `status` on `/diagnostics/env`: `:ok` or `:incomplete` (a `required` var is
+  missing). **Additive — the endpoint still returns 200 either way.**
+
+### Fixed
+
+- `Check#with_timing` now records `error_class` alongside the message. All
+  three built-in checks route through it, so without this every real driver
+  failure reached the aggregator with no class and the redacted body fell back
+  to a generic `StandardError` — exactly the useless label redaction exists to
+  replace.
+- Failure detail (`error_class` + `error_message`) now rides on
+  `ready.evaluated`, not only on `check.completed`. Both built-in subscribers
+  are driven by `ready.evaluated` (deliberately — it is the transition-gated
+  event), so the message would otherwise have been deleted from the response
+  without ever reaching logs or Sentry.
+
+### Security
+
+- **`/ready` no longer returns raw exception messages.** The endpoint is
+  unauthenticated by design, and a driver error will happily tell an anonymous
+  caller the database host, port and username — during exactly the incident
+  you least want to be leaking. Failing rows now carry `error_class` and a
+  stable `error_code` instead. The full message is not lost: it goes to logs
+  and Sentry via the instrumentation above, which is why redaction ships in
+  the same release rather than separately.
+  - `config.expose_check_errors = true` restores the previous bodies.
+  - `config.detail_token` + an `X-Health-Token` header is a break-glass path
+    for on-call, compared in constant time.
+  - `status`, `name`, `critical`, `latency_ms` and `generated_at` are
+    unchanged, so dashboards and existing specs keep working.
+
+### Notes on what is deliberately NOT on
+
+Timeouts and the total budget default to **off**, giving byte-identical
+behaviour to 0.4.0. Turning them on is a semantic change: a check that has
+always been slow-but-fine starts reporting `:fail`, and for a critical check
+that pulls the instance out of rotation. Shipping that in a patch, to five
+apps, on a `bundle update`, is how you cause the outage you were preventing.
+
+The machinery ships now so apps can opt in per check, and so the events above
+can reveal the real p99 latencies. Defaults get chosen from that data in
+0.5.0, which requires an explicit Gemfile edit.
+
+One semantic guard is already in place for when they are enabled: a check
+skipped because the budget ran out reports `:skipped` and floors the roll-up
+at `:degraded` — **never `:unavailable`**, even when the skipped check is
+critical. Otherwise a slow *non-critical* check could exhaust the budget,
+leave the database check unrun, and pull a healthy instance out of rotation.
+
+`total_check_budget` bounds **how many checks run**, not how long the probe
+takes — it is evaluated before each check starts, not during one. Clamping
+each check to the remaining budget would close that gap but would apply
+`Timeout.timeout` to checks whose author never asked for one, so setting a
+budget deliberately does not opt you into that. Asserted by spec, not just
+documented.
+
+A second reason to leave them off: `Timeout.timeout` raises into the running
+thread at an arbitrary point, so firing one mid-connection-checkout can return
+a broken connection to the pool. The dedicated `CheckTimeout` fixes
+mislabelling, not this. The README now carries the full caveat — the right
+answer for datastore checks is usually a driver-level timeout
+(`connect_timeout` / `statement_timeout`), not this setting.
+
 ## [0.4.0] - 2026-05-05
 
 ### Added

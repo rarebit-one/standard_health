@@ -184,6 +184,23 @@ Audit rows for entries declared inside a `group` block carry a `group` key:
 
 Entries declared outside any `group` block omit the `group` key entirely.
 
+### Top-level status
+
+Since 0.4.1 the response carries a `status` alongside the audit, so a caller
+can gate on one field instead of re-implementing the roll-up:
+
+```json
+{ "mode": "production", "status": "incomplete", "audit": [ ... ] }
+```
+
+`incomplete` means at least one `required` var is missing; `recommended` is
+advisory and never affects it.
+
+**The endpoint still returns 200 either way in 0.4.1.** That is deliberate: it
+gives monitors a release to migrate onto the field before 0.5.0 makes
+`incomplete` a 503. Flipping the status code without that window would
+silently redden every existing caller.
+
 ### Backward compatibility
 
 All v0.2.0 specs continue to produce identical audit output in v0.3.0. The new fields (`description`, `consumed_by`, `group`, `reason`) appear only when the corresponding feature is used; the new `:not_applicable` status only appears when a predicate suppresses an entry.
@@ -282,6 +299,130 @@ When `diagnostics_parent_controller` is unset, `DiagnosticsController` falls bac
 | `unavailable` | 503 | A critical check failed |
 
 The orchestrator should pull the instance out of rotation only on 503; degraded means "still serving, page someone."
+
+`skipped` also exists, for a check the total budget never reached (see
+Timeouts). A skip floors the roll-up at `degraded` and **never** produces
+`unavailable`, even for a critical check.
+
+## Failure detail is redacted
+
+Since 0.4.1, a failing check reports the exception **class** rather than its
+message:
+
+```json
+{ "name": "database", "critical": true, "status": "fail",
+  "error_class": "PG::ConnectionBad", "error_code": "pg_connection_bad" }
+```
+
+`/ready` is unauthenticated by design — probes carry no credentials — and a
+raw driver message will happily tell an anonymous caller the database host,
+port and username. The full message still reaches your logs and Sentry through
+the instrumentation below; it just isn't in the public body.
+
+```ruby
+c.expose_check_errors = true       # restore pre-0.4.1 verbose bodies
+c.detail_token = ENV["HEALTH_DETAIL_TOKEN"]   # X-Health-Token unlocks detail
+```
+
+`status`, `name`, `critical`, `latency_ms` and `generated_at` are unchanged.
+
+## Instrumentation
+
+The gem emits events on whichever bus is live — `Rails.event` on Rails 8.1+,
+`ActiveSupport::Notifications` otherwise:
+
+| Event | Payload |
+|---|---|
+| `standard_health.check.completed` | `name`, `critical`, `status`, `latency_ms`, `error_class`, `error_message` |
+| `standard_health.check.timed_out` | `name`, `critical`, `timeout_s` |
+| `standard_health.ready.evaluated` | `status`, `duration_ms`, `failed[]` |
+
+Three subscribers are registered automatically. Their noise profiles differ on
+purpose, because health events are **polls**, not state transitions — a 10s
+probe period means ~6 evaluations/minute/instance:
+
+- **Logger** — silent while healthy. `warn` on degraded, `error` on
+  unavailable. A line per evaluation would be ~8,640/day/instance of
+  "everything is fine".
+- **Sentry** — only on status **change**, plus a 60s repeat floor for a
+  sustained bad state, plus one `info` on recovery. Capturing every non-ok
+  poll would turn a five-minute outage into ~30 duplicate issues. Sentry is a
+  soft dependency; no gemspec entry.
+- **Metrics** — every poll, deliberately. Counters plus latency
+  distributions are what make `latency_ms` chartable.
+
+```ruby
+StandardHealth.configure do |c|
+  c.instrumentation_enabled = true    # default
+  c.logger        = Rails.logger      # default: Rails.logger
+  c.sentry_enabled = true             # default
+  c.metric_prefix  = "health"         # default
+
+  c.add_notifier(MyNotifier.new)      # must respond to call(event_name, payload)
+end
+```
+
+## Timeouts
+
+**Off by default.** Both settings are `nil`, which is byte-identical to 0.4.0.
+
+```ruby
+c.default_check_timeout = 2.0        # seconds, per check
+c.total_check_budget    = 5.0        # checked BEFORE each check starts
+c.register_check :db, MyCheck, critical: true, timeout: 1.0   # per-check override
+```
+
+**`total_check_budget` bounds how many checks RUN, not how long the probe
+takes.** It is evaluated before each check starts, not during one. With a 1s
+budget and a first check that blocks for 30s, `/ready` still takes 30s — only
+the checks *after* it are skipped.
+
+Clamping each check to the remaining budget would close that gap, and is
+deliberately not done: it would apply `Timeout.timeout` to checks whose author
+never asked for one, and that mechanism raises into the thread at an arbitrary
+point (see below). Setting a budget must not silently opt you into that. To
+bound wall-clock, put a `timeout:` on the checks that can safely take one.
+
+Enabling them is a semantic change — a check that has always been
+slow-but-fine starts reporting `:fail`, and for a critical check that pulls
+the instance out of rotation. Pick values from observed `latency_ms` rather
+than intuition; that is what the `check.completed` events are for.
+
+Checks the total budget never reaches report `:skipped`, never silently `:ok`.
+A skip alone floors the roll-up at `degraded` — otherwise a slow *non-critical*
+check could exhaust the budget, leave the database check unrun, and pull a
+healthy instance out of rotation.
+
+Checks run **sequentially**. They are not parallelised on purpose: running
+them in threads would mean connection checkouts from the health path, and a
+health endpoint that can exhaust the connection pool is a worse problem than
+the one it was added to solve.
+
+### ⚠ Know what `Timeout.timeout` actually does before enabling this
+
+Ruby's `Timeout.timeout` interrupts by raising **into the running thread at an
+arbitrary point**. It cannot wait for a safe boundary. If a timeout fires
+while a check is mid-way through a non-atomic operation — say a connection
+checkout in the `ActiveRecord` check — the connection can be returned to the
+pool in a broken state. You would have traded a slow check for a corrupted
+pool, on the health path, during an incident.
+
+The dedicated `CheckTimeout` class solves the *mislabelling* problem (a host's
+own `Timeout::Error` is never mistaken for ours). **It does not solve this
+one.** Nothing can, at this layer.
+
+So, before turning timeouts on:
+
+- Prefer a driver-level timeout where one exists — `connect_timeout` /
+  `statement_timeout` on the database, a client timeout on an HTTP dependency.
+  Those abort at a safe point because the driver owns the operation.
+- Reserve `timeout:` here for checks whose `run` is genuinely interruptible —
+  typically your own custom checks — rather than the built-in datastore ones.
+- Set the value comfortably above observed p99 (see the `latency_ms` in
+  `check.completed`), so it fires on a hang rather than on a slow day.
+
+This is why the defaults ship as `nil` and why choosing them is deferred: the
+right answer is usually a driver timeout, not this.
 
 ## License
 
