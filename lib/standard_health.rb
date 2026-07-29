@@ -8,6 +8,12 @@ require "standard_health/check"
 require "standard_health/checks/active_record"
 require "standard_health/checks/solid_queue"
 require "standard_health/checks/solid_cache"
+require "standard_health/event_emitter"
+require "standard_health/notifiers/logger"
+require "standard_health/notifiers/sentry"
+require "standard_health/notifiers/metrics"
+require "standard_health/subscribers"
+require "standard_health/redactor"
 require "standard_health/aggregator"
 
 module StandardHealth
@@ -31,6 +37,13 @@ module StandardHealth
     # gets a clean slate.
     def reset_config!
       @config = Configuration.new
+    end
+
+    # The subscriber registry. Wired at boot by the engine initializer; also
+    # callable directly so a host can re-run `setup!` after changing config
+    # at runtime (and so tests can tear subscriptions down between examples).
+    def subscribers
+      @subscribers ||= Subscribers.new
     end
 
     # Resolves `config.parent_controller` to an actual class lazily — at

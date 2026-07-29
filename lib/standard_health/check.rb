@@ -43,7 +43,12 @@ module StandardHealth
       latency_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).round
       { status: :ok, latency_ms: latency_ms }
     rescue StandardError => e
-      { status: :fail, error: e.message }
+      # `error_class` matters as much as the message. All three built-in
+      # checks route through here, so without it every real driver failure
+      # reaches the aggregator with no class — and the redacted response then
+      # falls back to a generic "StandardError", which is precisely the
+      # useless label redaction exists to replace with something groupable.
+      { status: :fail, error: e.message, error_class: e.class.name }
     end
   end
 end
