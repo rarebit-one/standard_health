@@ -2,7 +2,7 @@ PATH
   remote: .
   specs:
     standard_health (0.4.1)
-      rails (~> 8.0)
+      rails (>= 8.0)
 
 GEM
   remote: https://rubygems.org/

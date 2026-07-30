@@ -36,19 +36,25 @@ module StandardHealth
     # Top-level verdict so a caller can gate on ONE field instead of
     # re-implementing the roll-up over `audit`.
     #
-    #   :ok         — nothing required is missing
-    #   :incomplete — at least one `required` var is missing
+    #   :ok         — no violations
+    #   :incomplete — at least one row is `:missing`, `:forbidden`, or
+    #                 `:mismatch` (`EnvSpec::VIOLATION_STATUSES`)
     #
-    # ADDITIVE ONLY in 0.4.1: the endpoint still returns 200 either way, so
-    # nothing that asserts on the status code breaks. That is the point —
-    # it gives monitors a release in which to migrate onto this field before
-    # 0.5.0 makes `:incomplete` a 503. Without the migration window, turning
-    # the code non-200 would silently redden every existing caller.
+    # The `forbidden`/`mismatch` statuses join the roll-up rather than
+    # getting a verdict of their own, so callers that already gate on
+    # `status == "incomplete"` pick up the new assertions for free. Note the
+    # level is deliberately NOT consulted: a `recommended` var declared with
+    # an `expected_value:` that does not hold is a failed assertion, not
+    # advice. The advisory status stays `:should_set`, which is not a
+    # violation.
+    #
+    # The endpoint still returns 200 either way, so nothing that asserts on
+    # the status code breaks.
     def audit_status(audit)
-      incomplete = Array(audit).any? do |row|
-        row[:level].to_s == "required" && row[:status].to_s == "missing"
+      violated = Array(audit).any? do |row|
+        EnvSpec::VIOLATION_STATUSES.include?(row[:status])
       end
-      incomplete ? :incomplete : :ok
+      violated ? :incomplete : :ok
     end
   end
 end

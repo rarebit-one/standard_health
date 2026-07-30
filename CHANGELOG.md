@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Closes the gap that had four host apps writing their own checks. The env-spec
+DSL could only audit **presence**, so "this toggle must not be set on
+production" and "this value must be exactly `false`" were inexpressible — and
+the workaround was a hand-written check carrying a duplicate list of variable
+names, kept in sync with the spec by comment.
+
+Everything here is **additive and opt-in**. No check is auto-registered and no
+existing status changes meaning, so this is a pure `bundle update` for
+consumers on `~> 0.4`.
+
+### Added
+
+- **`forbidden` EnvSpec level.** Inverts the presence rule: absent is `:ok`,
+  present reports the new `:forbidden` status. For dangerous ops toggles —
+  demo modes, auth bypasses, bootstrap flags — that are legitimate on staging
+  and must never survive promotion. Composes with `in:`, `mode_alias`, groups
+  and the `if:`/`unless:` predicates like any other level.
+- **`expected_value:` assertion** on `required` / `recommended`. Asserts the
+  value, not just presence; a present-but-wrong value reports the new
+  `:mismatch` status. Accepts a String, an Array (any-of), a Regexp (matched,
+  not compared), or any object comparable by its string form. The **actual
+  value is never surfaced** — env values are routinely secrets — only the
+  declared expectation.
+- **`Checks::EnvSpecAudit`** (opt-in). Runs the configured `env_spec` and
+  fails on `:missing` / `:forbidden` / `:mismatch`, reporting offending
+  variable *names* grouped by status. Reads the spec directly, so there is no
+  second list to drift. Non-critical by default: config drift is visibility,
+  not a rotation signal. Skips `consumed_by` resolution — that is file IO per
+  entry, fine for an on-demand doctor endpoint and not on a polled tier.
+- **`Checks::SolidCable`** (opt-in). Bounded read against
+  `solid_cable_messages`. Promoted from sidekick-web. Falls back to the
+  primary connection when SolidCable isn't pointed at its own database.
+- **`standard_health:install` generator.** Writes the initializer and mounts
+  the engine, with the aggregate-route ordering requirement noted inline.
+  Idempotent; `--skip-initializer`, `--skip-routes`, `--force`.
+
+### Changed
+
+- **`/diagnostics/env` top-level `status`** now reports `incomplete` for
+  `:forbidden` and `:mismatch` rows as well as `:missing`. Callers already
+  gating on that one field pick up the new assertions for free, which is why
+  they joined the existing roll-up instead of getting a verdict of their own.
+  The endpoint still returns 200 either way. `:should_set` remains advisory
+  and still never affects the roll-up.
+- **Rails dependency relaxed** from `~> 8.0` to `>= 8.0`, matching the rest of
+  the `standard_*` family. `~> 8.0` was the only floor in the family that
+  would have blocked a Rails 9 host.
+
+### Documentation
+
+- **The aggregate `GET /health` tier and its ordering requirement are now
+  documented.** The engine draws sub-paths only; the aggregate tier is the
+  host's job and must be drawn **before** `mount`. An app that mounts first
+  and relies on the engine to serve it silently has no aggregate tier — no
+  boot error, no failing route spec. Also documents what each of the four
+  tiers is for, and that readiness gates only on hard infra the app owns.
+- New README section on opt-in checks, including why nothing here
+  auto-registers.
+
 ## [0.4.1] - 2026-07-29
 
 Observability release. Until now the gem emitted **nothing** — no events, no

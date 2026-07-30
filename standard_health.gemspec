@@ -25,5 +25,5 @@ Gem::Specification.new do |spec|
 
   spec.required_ruby_version = ">= 3.4"
 
-  spec.add_dependency "rails", "~> 8.0"
+  spec.add_dependency "rails", ">= 8.0"
 end

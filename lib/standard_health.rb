@@ -8,6 +8,10 @@ require "standard_health/check"
 require "standard_health/checks/active_record"
 require "standard_health/checks/solid_queue"
 require "standard_health/checks/solid_cache"
+# Opt-in checks — required so the constants resolve, NOT registered. See each
+# class for why auto-registration would break existing hosts on bundle update.
+require "standard_health/checks/solid_cable"
+require "standard_health/checks/env_spec_audit"
 require "standard_health/event_emitter"
 require "standard_health/notifiers/logger"
 require "standard_health/notifiers/sentry"
