@@ -93,8 +93,9 @@ module StandardHealth
     #
     # The machinery ships now so apps can opt in per check and so the events
     # emitted in this release can tell us what the real p99 latencies are.
-    # Sensible defaults get chosen from that data in 0.5.0, which requires an
-    # explicit Gemfile edit.
+    # Sensible defaults get chosen from that data in a later release, once
+    # enough p99 data has accumulated to pick them from evidence rather than
+    # guesswork — deliberately NOT 0.5.0, which shipped without it.
     attr_accessor :default_check_timeout
 
     # Budget across all checks, evaluated BEFORE each check starts. Checks not
