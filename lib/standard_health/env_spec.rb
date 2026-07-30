@@ -12,6 +12,8 @@ module StandardHealth
   #     required :SECRET_KEY_BASE
   #     required :APP_ENVIRONMENT, in: %w[staging production]
   #     recommended :SENTRY_DSN, description: "Error tracking DSN"
+  #     forbidden :DEMO_MODE_ENABLED, in: :live
+  #     required :CSP_REPORT_ONLY, in: :live, expected_value: "false"
   #
   #     group "Singpass / MyInfo" do
   #       required :MYINFO_CLIENT_ID
@@ -23,7 +25,7 @@ module StandardHealth
   #
   # Each entry has:
   #   - `name` (Symbol)
-  #   - `level` (:required | :recommended)
+  #   - `level` (:required | :recommended | :forbidden)
   #   - `in:` (Array<String>, Symbol, or nil) — when an Array, the entry only
   #     applies while `APP_ENVIRONMENT` matches one of these modes. A Symbol
   #     is resolved against `mode_alias` declarations at audit time. When
@@ -47,10 +49,27 @@ module StandardHealth
   #     Surfaced verbatim in audit rows.
   #   - `replacement:` (String, optional) — what to use instead. Surfaced
   #     in audit rows.
+  #   - `expected_value:` (String/Symbol/Numeric/Regexp/Array, optional) —
+  #     asserts the *value*, not just presence. A present value that does
+  #     not match reports `status: :mismatch`. An Array means "any of".
+  #     Surfaced in audit rows as `expected_value:` so an operator can see
+  #     what was demanded; the actual value is deliberately NEVER surfaced
+  #     (env values are frequently secrets).
   class EnvSpec
     # Raised when `in:` references a Symbol that hasn't been declared via
     # `mode_alias`.
     class UnknownModeAlias < ArgumentError; end
+
+    # Levels whose absence is fine and whose *presence* is the failure.
+    FORBIDDEN_LEVEL = :forbidden
+
+    # Statuses that mean the environment is wrong, as opposed to merely
+    # advisory (`:should_set`) or inapplicable (`:not_applicable`).
+    #
+    # Shared by `DiagnosticsController#audit_status` and the opt-in
+    # `Checks::EnvSpecAudit`, so the doctor endpoint and the health check
+    # cannot drift apart on what counts as a violation.
+    VIOLATION_STATUSES = %i[missing forbidden mismatch].freeze
 
     # Internal entry record. `modes` may be an Array<String> or a Symbol
     # alias that gets resolved at audit time.
@@ -66,6 +85,7 @@ module StandardHealth
       :deprecated,
       :sunset_on,
       :replacement,
+      :expected_value,
       keyword_init: true
     )
 
@@ -128,6 +148,31 @@ module StandardHealth
       add(:recommended, name, **opts)
     end
 
+    # Declare an env var that must NOT be set (in the applicable modes).
+    # Inverts the presence rule: absent is `:ok`, present is `:forbidden`.
+    #
+    # This is the level for dangerous ops toggles — demo modes, auth
+    # bypasses, bootstrap flags — that are legitimate on staging and must
+    # never survive to production:
+    #
+    #   forbidden :DEMO_MODE_ENABLED, in: :live,
+    #     description: "Demo surfaces; unset before promoting"
+    #
+    # `expected_value:` is meaningless here (the assertion is "absent"), so
+    # combining them is a declaration error rather than a silently ignored
+    # option. Raised at `define` time — i.e. host boot, well off the health
+    # path — so it can never surface as a 500 from /ready.
+    def forbidden(name, **opts)
+      if opts.key?(:expected_value)
+        raise ArgumentError,
+              "`forbidden` asserts absence, so expected_value: is meaningless " \
+              "(got #{opts[:expected_value].inspect} for #{name}). Use " \
+              "`required ..., expected_value:` to assert a value instead."
+      end
+
+      add(FORBIDDEN_LEVEL, name, **opts)
+    end
+
     # Run the audit against an env-like hash.
     #
     # @param env_hash [Hash{String, Symbol => String}] e.g. ENV.to_h
@@ -143,8 +188,8 @@ module StandardHealth
     #   least `name`, `level`, `status`, `mode`. When an entry is suppressed
     #   by an `if:`/`unless:` predicate, `status` is `:not_applicable` and a
     #   `reason` field explains why. `description`, `consumed_by`, `group`,
-    #   `deprecated`, `sunset_on`, `replacement`, and `consumer` are
-    #   included when set on the entry / computed during audit.
+    #   `deprecated`, `sunset_on`, `replacement`, `expected_value`, and
+    #   `consumer` are included when set on the entry / computed during audit.
     def audit(env_hash, mode:, root: nil)
       mode_str = mode.to_s
       env = stringify(env_hash)
@@ -185,7 +230,8 @@ module StandardHealth
         group: @group_stack.last,
         deprecated: opts[:deprecated] ? true : nil,
         sunset_on: opts[:sunset_on],
-        replacement: opts[:replacement]
+        replacement: opts[:replacement],
+        expected_value: opts[:expected_value]
       )
     end
 
@@ -241,7 +287,26 @@ module StandardHealth
       row[:deprecated] = true if entry.deprecated
       row[:sunset_on] = entry.sunset_on.to_s if entry.sunset_on
       row[:replacement] = entry.replacement if entry.replacement
+      # The DECLARED expectation is safe to surface — it is config the host
+      # wrote, not process state. The ACTUAL value is never surfaced: env
+      # values are routinely secrets, and /diagnostics/env exists to report
+      # that something is wrong, not to echo it back.
+      row[:expected_value] = serialize_expected(entry.expected_value) unless entry.expected_value.nil?
       row
+    end
+
+    # Regexps have to become strings to survive JSON rendering; an Array of
+    # candidates stays an Array so a caller can see every accepted value.
+    def serialize_expected(expected)
+      if expected.is_a?(Array)
+        expected.map { |candidate| stringify_expected(candidate) }
+      else
+        stringify_expected(expected)
+      end
+    end
+
+    def stringify_expected(candidate)
+      candidate.is_a?(Regexp) ? candidate.inspect : candidate.to_s
     end
 
     # Resolve the consumer-presence state for an entry. Returns nil when
@@ -283,11 +348,48 @@ module StandardHealth
       value.length == 1 ? value.first : value
     end
 
+    # Resolve one entry against the value found in the env.
+    #
+    #   :forbidden  — a `forbidden` entry is set
+    #   :missing    — a `required` entry is absent
+    #   :should_set — a `recommended` entry is absent
+    #   :mismatch   — present, but `expected_value:` says otherwise
+    #   :ok         — everything else
+    #
+    # Presence is checked first for every level, because "absent" is
+    # unambiguous: it satisfies `forbidden`, violates `required`, and there
+    # is nothing for `expected_value:` to compare against.
     def classify(entry, value)
       present = !value.nil? && !value.to_s.empty?
-      return :ok if present
 
-      entry.level == :required ? :missing : :should_set
+      if entry.level == FORBIDDEN_LEVEL
+        return present ? :forbidden : :ok
+      end
+
+      unless present
+        return entry.level == :required ? :missing : :should_set
+      end
+
+      return :mismatch unless expected_value_satisfied?(entry, value)
+
+      :ok
+    end
+
+    # Compare a present value against `expected_value:`. Comparison is on
+    # the string form, since everything arriving from ENV is a String —
+    # `expected_value: 5` matching `"5"` is the intuitive reading, and the
+    # alternative (never matching) would be a silent trap.
+    #
+    # An Array means "any of". A Regexp is matched, not compared, which is
+    # what makes value ranges and prefixes expressible.
+    def expected_value_satisfied?(entry, value)
+      expected = entry.expected_value
+      return true if expected.nil?
+
+      actual = value.to_s
+      Array(expected).any? do |candidate|
+        candidate.is_a?(Regexp) ? candidate.match?(actual) : candidate.to_s == actual
+      end
     end
 
     def stringify(env_hash)

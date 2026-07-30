@@ -18,7 +18,16 @@ Add to your Gemfile:
 gem "standard_health"
 ```
 
-Then `bundle install`.
+Then `bundle install`, and run the install generator:
+
+```bash
+bin/rails generate standard_health:install
+```
+
+It writes `config/initializers/standard_health.rb` and mounts the engine in
+`config/routes.rb` with the ordering requirement below noted inline. It is
+idempotent — re-running skips what is already installed. Flags:
+`--skip-initializer`, `--skip-routes`, `--force` (overwrite the initializer).
 
 ## Mounting
 
@@ -34,9 +43,45 @@ This wires up:
 - `GET /health/ready`
 - `GET /health/diagnostics/env`
 
+### The aggregate `GET /health` is yours to draw — before the mount
+
+**The engine draws sub-paths only.** There is no `GET /health` in
+`config/routes.rb` here; the aggregate tier is the host's responsibility, and
+the ordering is not optional:
+
+```ruby
+get "/health", to: "health_aggregate#show"          # aggregate — FIRST
+mount StandardHealth::Engine => "/health", as: :standard_health
+```
+
+An app that mounts the engine **first** and relies on it to serve the aggregate
+tier **silently has no aggregate tier at all** — no boot error, no 404 at boot,
+and no failing route spec unless one exists. The failure surfaces as a
+dashboard that has been reading nothing for months. Add a route spec asserting
+`GET /health` resolves.
+
+Why this way round: `mount` claims the `/health` prefix, so a bare `GET /health`
+drawn *after* it still resolves (the engine has no route for the bare path) —
+but nothing about that is obvious from reading the file, and getting it
+backwards fails silently either way. Draw it first and the ordering question
+never arises.
+
+The four tiers, and what each is for:
+
+| Route | Tier | Consumer |
+|---|---|---|
+| `GET /health/alive` | liveness — process is up | restart probes, CI reachability gates |
+| `GET /health/ready` | readiness — **rotation gate** | load balancer / platform health check |
+| `GET /health` | aggregate — full picture | dashboards, humans |
+| `GET /health/diagnostics/env` | doctor (authed) | on-call, config audits |
+
+Readiness gates **only** on hard infra the app owns. A soft upstream that
+degrades must not pull an instance out of rotation — put those on the aggregate
+tier instead.
+
 ## Configuration
 
-Create `config/initializers/standard_health.rb`:
+Create `config/initializers/standard_health.rb` (or let the generator write it):
 
 ```ruby
 StandardHealth.configure do |c|
@@ -62,17 +107,20 @@ end
 
 ## EnvSpec
 
-The DSL has two declarations:
+The DSL has three declarations:
 
 - `required :NAME` — missing value reports `status: :missing`
 - `recommended :NAME` — missing value reports `status: :should_set`
+- `forbidden :NAME` — **present** value reports `status: :forbidden`; absent is `:ok`
 
-Both accept:
+All three accept:
 
 - `in: %w[staging production]` — restricts the entry to those `APP_ENVIRONMENT` values; ignored otherwise. May also be a Symbol resolved via `mode_alias` (see below).
 - `description: "..."` — surfaced verbatim in the audit JSON
 - `consumed_by: "config/initializers/sentry.rb"` — pointer (or `Array<String>`) to where the value is read; surfaced verbatim
 - `if: -> { ... }` / `unless: -> { ... }` — Proc predicates evaluated at audit time. When `unless:` returns truthy or `if:` returns falsy, the entry is reported with `status: :not_applicable`
+
+`required` and `recommended` additionally accept `expected_value:` (see below). `forbidden` does not — its assertion *is* "absent" — and combining them raises an `ArgumentError` at `define` time rather than silently ignoring the option.
 
 Audit output (one row per applicable entry):
 
@@ -85,7 +133,68 @@ Audit output (one row per applicable entry):
 }
 ```
 
-Possible `status` values are `ok`, `missing` (required + absent), `should_set` (recommended + absent), and `not_applicable` (suppressed by an `if:`/`unless:` predicate).
+Possible `status` values:
+
+| status | meaning |
+|---|---|
+| `ok` | nothing to report |
+| `missing` | `required` + absent |
+| `should_set` | `recommended` + absent (advisory) |
+| `forbidden` | `forbidden` + **present** |
+| `mismatch` | present, but `expected_value:` says otherwise |
+| `not_applicable` | suppressed by an `if:`/`unless:` predicate |
+
+`missing`, `forbidden` and `mismatch` are the **violation** statuses — they drive the top-level `status: "incomplete"` and the optional `EnvSpecAudit` check. `should_set` is advisory and never counts as a violation.
+
+### `forbidden`: vars that must NOT be set
+
+For dangerous ops toggles — demo modes, auth bypasses, bootstrap flags — that are legitimate on staging and must never survive promotion to production:
+
+```ruby
+mode_alias :live, %w[production]
+
+group "Production-forbidden toggles" do
+  forbidden :DEMO_MODE_ENABLED, in: :live,
+    description: "Demo/ops dashboard surfaces; unset before promoting"
+  forbidden :STANDARD_ID_BYPASS_CODE, in: :live,
+    description: "Fixed E2E OTP bypass code; staging only"
+end
+```
+
+```json
+{ "name": "DEMO_MODE_ENABLED", "level": "forbidden", "status": "forbidden", "mode": "production" }
+```
+
+Before this level existed, hosts expressed "forbidden" by declaring the var `recommended` with an `if: -> { ENV[...].present? }` predicate so that a set toggle at least produced a row — but the row was a green `:ok`, so the signal had to be carried by a hand-written custom check with its own duplicate list of toggle names. `forbidden` replaces both halves.
+
+### `expected_value:`: assert the value, not just presence
+
+Presence auditing misses the case where a var is set to the *wrong* thing — which for a security toggle is the failure mode that matters:
+
+```ruby
+# CSP is only enforced when this is exactly the string "false";
+# "true" passes a presence audit while leaving the CSP report-only.
+required :CONTENT_SECURITY_POLICY_REPORT_ONLY, in: :live,
+  expected_value: "false",
+  description: "Any other value leaves the CSP report-only"
+
+required :LOG_LEVEL, expected_value: %w[info warn]   # any of
+required :DATABASE_URL, expected_value: /\Apostgres:/ # matched, not compared
+```
+
+A present-but-wrong value reports `status: :mismatch`. An absent value still reports `:missing` / `:should_set` — there is nothing to compare. Comparison is on the string form, so `expected_value: 3000` matches `"3000"`.
+
+**The actual value is never surfaced.** Env values are routinely secrets, and the endpoint exists to report *that* something is wrong, not to echo it back. The row carries the declared `expected_value` (host config, safe) and nothing else:
+
+```json
+{
+  "name": "CONTENT_SECURITY_POLICY_REPORT_ONLY",
+  "level": "required",
+  "status": "mismatch",
+  "expected_value": "false",
+  "mode": "production"
+}
+```
 
 ### Predicates: `if:` and `unless:`
 
@@ -193,13 +302,31 @@ can gate on one field instead of re-implementing the roll-up:
 { "mode": "production", "status": "incomplete", "audit": [ ... ] }
 ```
 
-`incomplete` means at least one `required` var is missing; `recommended` is
-advisory and never affects it.
+`incomplete` means at least one row is a **violation** — `missing`,
+`forbidden`, or `mismatch`. `should_set` is advisory and never affects it.
 
-**The endpoint still returns 200 either way in 0.4.1.** That is deliberate: it
-gives monitors a release to migrate onto the field before 0.5.0 makes
-`incomplete` a 503. Flipping the status code without that window would
-silently redden every existing caller.
+The level is deliberately not consulted for `mismatch`: a `recommended` var
+declared with an `expected_value:` that does not hold is a failed assertion,
+not advice.
+
+**The endpoint still returns 200 either way.** Callers that already gate on
+`status == "incomplete"` pick up the `forbidden` and `mismatch` assertions for
+free — which is why they joined this roll-up rather than getting a verdict of
+their own.
+
+### Surfacing the audit on a health tier
+
+`/diagnostics/env` is authed and polled by nobody, so config drift declared in
+the spec is invisible until someone looks. Register the opt-in `EnvSpecAudit`
+check to put the same verdict on a health tier:
+
+```ruby
+c.register_check :env_spec, StandardHealth::Checks::EnvSpecAudit
+```
+
+It fails on `:missing` / `:forbidden` / `:mismatch` rows and reports the
+offending **names** (never values). Non-critical by default — see
+[Opt-in checks](#opt-in-checks).
 
 ### Backward compatibility
 
@@ -222,6 +349,81 @@ end
 ```
 
 `with_timing` captures `latency_ms` on success and converts any `StandardError` into `{ status: :fail, error: <message> }`.
+
+**A check must never raise.** `Aggregator` rescues `StandardError` per check, so a buggy check degrades to `:fail` rather than 500ing the endpoint — but don't rely on that as the only line of defence. Route fallible work through `with_timing`.
+
+## Opt-in checks
+
+Every check in this gem must be registered explicitly; **none are registered
+automatically**, including the ones below. That is a deliberate constraint on
+the gem: auto-registering a check turns it on for every host on a `bundle
+update`, and a host that has never had SolidCable installed — or whose env spec
+has a pre-existing violation — would go from green to yellow across its estate
+for a check nobody asked for. New checks are additive only when they are opt-in.
+
+| Check | Probes | `critical:` default |
+|---|---|---|
+| `Checks::ActiveRecord` | `SELECT 1` on the primary connection | `true` |
+| `Checks::SolidQueue` | SolidQueue's tables | `true` |
+| `Checks::SolidCache` | read-only `Rails.cache` probe | `false` |
+| `Checks::SolidCable` | `solid_cable_messages` store | `false` |
+| `Checks::EnvSpecAudit` | the configured `env_spec` | `false` |
+
+The `critical:` default is only a default — `register_check` overrides it, and
+what belongs on the rotation gate is a per-app decision.
+
+```ruby
+StandardHealth.configure do |c|
+  c.register_check :solid_cable, StandardHealth::Checks::SolidCable
+  c.register_check :env_spec, StandardHealth::Checks::EnvSpecAudit
+end
+```
+
+### `Checks::SolidCable`
+
+Bounded read against `solid_cable_messages`, confirming both that the cable
+schema is migrated and that its connection is up. Uses
+`SolidCable::Record.connection` when SolidCable is pointed at a separate
+database, falling back to the primary connection when it isn't.
+
+Cable is a **degradable feature dependency** — prefer this on the aggregate
+tier. A broken cable store should mark the app `degraded`, never de-rotate it.
+
+### `Checks::EnvSpecAudit`
+
+Runs the configured `env_spec` and fails on the violation statuses
+(`:missing`, `:forbidden`, `:mismatch`), reporting the offending variable
+**names** grouped by status. Values never appear.
+
+It reads the spec directly, so there is one declaration and no second list to
+keep in sync — which is the whole reason it exists. It skips `consumed_by`
+resolution (that does file IO per entry, fine for an on-demand doctor endpoint
+and not fine on a tier polled every few seconds), and it is `:ok` when no
+`env_spec` is configured.
+
+Non-critical by default, and that default is load-bearing: config drift is
+*visibility*, not a rotation signal. An instance with a stale toggle set is
+still serving traffic correctly, and de-rotating it converts a warning into an
+outage. Registering it `critical: true` asserts "this app must not serve at all
+with a bad env" — a real but rare posture. Know which you want.
+
+The aggregator instantiates checks with `name:`/`critical:` only, so to narrow
+what counts as a failure, subclass:
+
+```ruby
+class ForbiddenTogglesOnly < StandardHealth::Checks::EnvSpecAudit
+  def initialize(name: :forbidden_toggles, critical: false)
+    super(name: name, critical: critical, fail_on: %i[forbidden])
+  end
+end
+```
+
+Note the failure message is subject to [redaction](#failure-detail-is-redacted)
+on `/ready` like any other check; the detail reaches you through logs and
+Sentry. The row carries a stable `error_class` of
+`StandardHealth::EnvSpecViolation`, so the redacted body still groups on
+`error_code: "standard_health_env_spec_violation"` rather than a useless
+`standard_error`.
 
 ## Auth
 

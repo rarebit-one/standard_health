@@ -395,4 +395,170 @@ RSpec.describe StandardHealth::EnvSpec do
       expect(audit[1]).not_to have_key(:deprecated)
     end
   end
+
+  describe "forbidden level" do
+    it "reports :ok when a forbidden var is unset (the safe state)" do
+      spec = described_class.define { forbidden :DEMO_MODE_ENABLED }
+
+      audit = spec.audit({}, mode: "production")
+
+      expect(audit.first).to include(
+        name: :DEMO_MODE_ENABLED, level: :forbidden, status: :ok
+      )
+    end
+
+    it "reports :forbidden when the var is set" do
+      spec = described_class.define { forbidden :DEMO_MODE_ENABLED }
+
+      audit = spec.audit({ "DEMO_MODE_ENABLED" => "1" }, mode: "production")
+
+      expect(audit.first).to include(level: :forbidden, status: :forbidden)
+    end
+
+    it "treats an empty string as unset, matching the other levels" do
+      spec = described_class.define { forbidden :DEMO_MODE_ENABLED }
+
+      audit = spec.audit({ "DEMO_MODE_ENABLED" => "" }, mode: "production")
+
+      expect(audit.first).to include(status: :ok)
+    end
+
+    it "never surfaces the offending value" do
+      spec = described_class.define { forbidden :STANDARD_ID_BYPASS_CODE }
+
+      audit = spec.audit({ "STANDARD_ID_BYPASS_CODE" => "s3cret" }, mode: "production")
+
+      expect(audit.first.to_s).not_to include("s3cret")
+    end
+
+    it "honours in: so a toggle can be legal on staging and forbidden on production" do
+      spec = described_class.define do
+        mode_alias :live, %w[production]
+        forbidden :DEMO_MODE_ENABLED, in: :live
+      end
+
+      expect(spec.audit({ "DEMO_MODE_ENABLED" => "1" }, mode: "staging")).to be_empty
+      expect(spec.audit({ "DEMO_MODE_ENABLED" => "1" }, mode: "production").first)
+        .to include(status: :forbidden)
+    end
+
+    it "is still suppressible by predicates" do
+      spec = described_class.define do
+        forbidden :DEMO_MODE_ENABLED, unless: -> { true }
+      end
+
+      audit = spec.audit({ "DEMO_MODE_ENABLED" => "1" }, mode: "production")
+
+      expect(audit.first).to include(status: :not_applicable)
+    end
+
+    it "rejects expected_value: at declaration time rather than ignoring it" do
+      expect {
+        described_class.define { forbidden :FOO, expected_value: "bar" }
+      }.to raise_error(ArgumentError, /expected_value: is meaningless/)
+    end
+  end
+
+  describe "expected_value:" do
+    it "reports :ok when the value matches" do
+      spec = described_class.define do
+        required :CSP_REPORT_ONLY, expected_value: "false"
+      end
+
+      audit = spec.audit({ "CSP_REPORT_ONLY" => "false" }, mode: "production")
+
+      expect(audit.first).to include(status: :ok)
+    end
+
+    it "reports :mismatch when a present value does not match" do
+      spec = described_class.define do
+        required :CSP_REPORT_ONLY, expected_value: "false"
+      end
+
+      audit = spec.audit({ "CSP_REPORT_ONLY" => "true" }, mode: "production")
+
+      expect(audit.first).to include(status: :mismatch)
+    end
+
+    it "still reports :missing when the var is absent entirely" do
+      spec = described_class.define do
+        required :CSP_REPORT_ONLY, expected_value: "false"
+      end
+
+      expect(spec.audit({}, mode: "production").first).to include(status: :missing)
+    end
+
+    it "reports :should_set (not :mismatch) for an absent recommended var" do
+      spec = described_class.define do
+        recommended :LOG_LEVEL, expected_value: "info"
+      end
+
+      expect(spec.audit({}, mode: "production").first).to include(status: :should_set)
+    end
+
+    it "flags a mismatch on a recommended var — a failed assertion, not advice" do
+      spec = described_class.define do
+        recommended :LOG_LEVEL, expected_value: "info"
+      end
+
+      audit = spec.audit({ "LOG_LEVEL" => "debug" }, mode: "production")
+
+      expect(audit.first).to include(status: :mismatch)
+    end
+
+    it "accepts an Array as any-of" do
+      spec = described_class.define do
+        required :LOG_LEVEL, expected_value: %w[info warn]
+      end
+
+      expect(spec.audit({ "LOG_LEVEL" => "warn" }, mode: "x").first).to include(status: :ok)
+      expect(spec.audit({ "LOG_LEVEL" => "debug" }, mode: "x").first).to include(status: :mismatch)
+    end
+
+    it "matches a Regexp rather than comparing it" do
+      spec = described_class.define do
+        required :DATABASE_URL, expected_value: /\Apostgres:/
+      end
+
+      expect(spec.audit({ "DATABASE_URL" => "postgres://x" }, mode: "x").first)
+        .to include(status: :ok)
+      expect(spec.audit({ "DATABASE_URL" => "mysql2://x" }, mode: "x").first)
+        .to include(status: :mismatch)
+    end
+
+    it "compares on the string form so a numeric expectation matches ENV's string" do
+      spec = described_class.define { required :PORT, expected_value: 3000 }
+
+      expect(spec.audit({ "PORT" => "3000" }, mode: "x").first).to include(status: :ok)
+    end
+
+    it "surfaces the declared expectation but never the actual value" do
+      spec = described_class.define do
+        required :API_MODE, expected_value: "live"
+      end
+
+      row = spec.audit({ "API_MODE" => "sandbox-leaky" }, mode: "production").first
+
+      expect(row).to include(expected_value: "live")
+      expect(row.to_s).not_to include("sandbox-leaky")
+    end
+
+    it "serializes a Regexp and an Array of candidates for JSON rendering" do
+      spec = described_class.define do
+        required :A, expected_value: /\Ax/
+        required :B, expected_value: %w[one two]
+      end
+
+      audit = spec.audit({ "A" => "x", "B" => "one" }, mode: "x")
+
+      expect(audit[0][:expected_value]).to eq("/\\Ax/")
+      expect(audit[1][:expected_value]).to eq(%w[one two])
+    end
+
+    it "omits expected_value from rows that did not declare one" do
+      spec = described_class.define { required :PLAIN }
+
+      expect(spec.audit({ "PLAIN" => "x" }, mode: "x").first).not_to have_key(:expected_value)
+    end
+  end
 end

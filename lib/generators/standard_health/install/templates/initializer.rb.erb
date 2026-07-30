@@ -1,0 +1,99 @@
+# frozen_string_literal: true
+
+# StandardHealth configuration.
+#
+# ── ROUTE ORDERING (read this before touching config/routes.rb) ─────────────
+#
+# The engine draws SUB-paths only: /alive, /ready, /diagnostics/env. The
+# aggregate `GET /health` is the HOST's responsibility, and it must be drawn
+# BEFORE the mount:
+#
+#   get "/health", to: "health_aggregate#show"          # aggregate — FIRST
+#   mount StandardHealth::Engine => "/health", as: :standard_health
+#
+# An app that mounts the engine first and expects it to serve the aggregate
+# tier silently has no aggregate tier at all — no boot error, and no failing
+# route spec unless one exists. Add a route spec for `GET /health`.
+#
+# Tiers: /alive = liveness (process up) · /ready = readiness (rotation gate)
+# /health = aggregate (dashboards) · /diagnostics/env = authed doctor.
+# ────────────────────────────────────────────────────────────────────────────
+
+StandardHealth.configure do |config|
+  # Controller the engine's controllers inherit from. Defaults to
+  # ActionController::API so the engine works unconfigured in API-only apps.
+  # config.parent_controller = "ApplicationController"
+
+  # /diagnostics/env enumerates which env vars are missing or wrong — protect
+  # it. Setting a diagnostics-only parent lets you put auth on the doctor tier
+  # without the callback leaking onto /alive and /ready.
+  # config.diagnostics_parent_controller = "DiagnosticsBaseController"
+
+  # ── Checks ───────────────────────────────────────────────────────────────
+  #
+  # READINESS GATES ONLY ON HARD INFRA THIS APP OWNS. A failing critical check
+  # pulls the instance out of rotation, so `critical: true` belongs on the
+  # database and little else. Soft upstreams degrade; they never gate rotation.
+  config.register_check :database, StandardHealth::Checks::ActiveRecord, critical: true
+  # config.register_check :cache, StandardHealth::Checks::SolidCache
+  # config.register_check :queue, StandardHealth::Checks::SolidQueue
+
+  # Opt-in checks — not registered by default. Uncomment what applies.
+  #
+  # SolidCable: probes the `solid_cable_messages` store. Prefer this on the
+  # AGGREGATE tier; a broken cable store should degrade, not de-rotate.
+  # config.register_check :solid_cable, StandardHealth::Checks::SolidCable
+  #
+  # EnvSpecAudit: surfaces the env_spec below as a health check, failing on
+  # :missing / :forbidden / :mismatch rows. This is how config drift becomes
+  # visible without anyone polling the authed doctor endpoint. Non-critical by
+  # default on purpose — drift is a warning, not a reason to stop serving.
+  # config.register_check :env_spec, StandardHealth::Checks::EnvSpecAudit
+
+  # ── Timeouts ─────────────────────────────────────────────────────────────
+  #
+  # Both OFF by default. Read the README's Timeout.timeout caveat before
+  # enabling: it raises into the thread at an arbitrary point and can return a
+  # broken connection to the pool. A driver-level timeout is almost always the
+  # better tool.
+  # config.default_check_timeout = 2
+  # config.total_check_budget = 5
+
+  # ── Env spec ─────────────────────────────────────────────────────────────
+  #
+  # Declare what this app needs from its environment. Audited by
+  # /diagnostics/env, and by the EnvSpecAudit check above if registered.
+  config.env_spec = StandardHealth::EnvSpec.define do
+    # Reusable groupings of APP_ENVIRONMENT values, referenced as Symbols in `in:`.
+    mode_alias :deployed, %w[staging preview production]
+    mode_alias :live, %w[production]
+
+    group "Core" do
+      required :SECRET_KEY_BASE
+      required :DATABASE_URL, in: :deployed
+    end
+
+    group "Observability" do
+      recommended :SENTRY_DSN,
+        description: "Error tracking DSN (unique per environment)",
+        consumed_by: "config/initializers/sentry.rb"
+    end
+
+    # `forbidden` inverts the presence rule: absent is :ok, present is
+    # :forbidden. This is the level for dangerous toggles that are fine on
+    # staging and must never survive promotion — no custom check needed.
+    # group "Production-forbidden toggles" do
+    #   forbidden :DEMO_MODE_ENABLED, in: :live,
+    #     description: "Demo surfaces; unset before promoting"
+    #   forbidden :BOOTSTRAP_NEEDED, in: :live,
+    #     description: "First-boot admin bootstrap; unset once an admin exists"
+    # end
+
+    # `expected_value:` asserts the VALUE, not just presence. A present value
+    # that does not match reports :mismatch. Accepts a String, an Array
+    # ("any of"), or a Regexp.
+    # required :CONTENT_SECURITY_POLICY_REPORT_ONLY, in: :live,
+    #   expected_value: "false",
+    #   description: "Any other value leaves the CSP report-only"
+  end
+end

@@ -4,10 +4,11 @@ require "rails_helper"
 
 # The additive `status` field on /diagnostics/env.
 #
-# In 0.4.1 this is REPORTING ONLY — the endpoint still returns 200 either way.
-# That is the migration window: monitors move onto the field now, and 0.5.0
-# can make `:incomplete` a 503 without silently reddening every caller that
-# asserts on the status code today.
+# REPORTING ONLY — the endpoint still returns 200 either way, so callers that
+# assert on the status code keep working. `incomplete` covers all three
+# violation statuses (`missing`, `forbidden`, `mismatch`); the newer two joined
+# this roll-up rather than getting a verdict of their own precisely so callers
+# already gating on this field pick them up for free.
 RSpec.describe "/diagnostics/env status field", type: :request do
   def audit_body
     get "/health/diagnostics/env"
@@ -54,6 +55,71 @@ RSpec.describe "/diagnostics/env status field", type: :request do
 
     it "is still ok — recommended is advisory, not required" do
       expect(audit_body["status"]).to eq("ok")
+    end
+  end
+
+  context "when a forbidden var is set" do
+    before do
+      ENV["SH_TEST_FORBIDDEN_TOGGLE"] = "1"
+      StandardHealth.config.env_spec = StandardHealth::EnvSpec.define do
+        forbidden :SH_TEST_FORBIDDEN_TOGGLE
+      end
+    end
+
+    after { ENV.delete("SH_TEST_FORBIDDEN_TOGGLE") }
+
+    it "rolls up to incomplete" do
+      expect(audit_body["status"]).to eq("incomplete")
+    end
+
+    it "reports the forbidden status on the row, still with 200" do
+      body = audit_body
+
+      expect(response).to have_http_status(:ok)
+      expect(body["audit"].first).to include("status" => "forbidden", "level" => "forbidden")
+    end
+
+    it "does not echo the offending value" do
+      expect(audit_body.to_s).not_to include('"1"')
+    end
+  end
+
+  context "when a var is present but violates expected_value" do
+    before do
+      ENV["SH_TEST_CSP_TOGGLE"] = "true"
+      StandardHealth.config.env_spec = StandardHealth::EnvSpec.define do
+        required :SH_TEST_CSP_TOGGLE, expected_value: "false"
+      end
+    end
+
+    after { ENV.delete("SH_TEST_CSP_TOGGLE") }
+
+    it "rolls up to incomplete even though the var is present" do
+      expect(audit_body["status"]).to eq("incomplete")
+    end
+
+    it "surfaces the declared expectation but not the actual value" do
+      row = audit_body["audit"].first
+
+      expect(row).to include("status" => "mismatch", "expected_value" => "false")
+      expect(row.values).not_to include("true")
+    end
+  end
+
+  context "when a recommended var mismatches its expected_value" do
+    before do
+      ENV["SH_TEST_LOG_LEVEL"] = "debug"
+      StandardHealth.config.env_spec = StandardHealth::EnvSpec.define do
+        recommended :SH_TEST_LOG_LEVEL, expected_value: "info"
+      end
+    end
+
+    after { ENV.delete("SH_TEST_LOG_LEVEL") }
+
+    # A declared assertion that does not hold is a failure, not advice —
+    # unlike a merely absent recommended var.
+    it "rolls up to incomplete despite the advisory level" do
+      expect(audit_body["status"]).to eq("incomplete")
     end
   end
 
