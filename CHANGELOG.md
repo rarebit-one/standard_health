@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-30
+
 Closes the gap that had four host apps writing their own checks. The env-spec
 DSL could only audit **presence**, so "this toggle must not be set on
 production" and "this value must be exactly `false`" were inexpressible — and
@@ -54,6 +56,19 @@ consumers on `~> 0.4`.
 - **Rails dependency relaxed** from `~> 8.0` to `>= 8.0`, matching the rest of
   the `standard_*` family. `~> 8.0` was the only floor in the family that
   would have blocked a Rails 9 host.
+
+### Not in this release
+
+- **Timeout defaults remain unset.** 0.4.1 said sensible `default_check_timeout`
+  / budget values would be chosen "in 0.5.0". They are not: choosing them still
+  needs enough real p99 latency data from the instrumentation 0.4.1 added, and
+  guessing a timeout on a health check is how you cause the outage you were
+  trying to prevent. The machinery stays opt-in per check. The stale promise in
+  `Configuration` has been repointed (#48).
+- **`/diagnostics/env` still returns 200** when `status` is `incomplete`.
+  Turning that into a 503 is a breaking contract change for any caller gating on
+  the response code, so it wants its own decision rather than riding along with
+  an otherwise additive release.
 
 ### Documentation
 
