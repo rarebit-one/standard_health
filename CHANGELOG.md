@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-24
+
+CI and tooling only — no runtime code changes, so this is a pure
+`bundle update` for consumers on `~> 0.5`.
+
+### Changed
+
+- CI now calls the shared `rarebit-one/.github` `reusable-gem-ci.yml@v2`
+  workflow and tests against Ruby 3.4.4 and 4.0.0–4.0.4 (previously 3.4.4
+  only, while every consumer runs 4.0.x). `bundler-audit` still runs in lint.
+  Required status checks are now `ci / lint` and `ci / test`.
+- `.ruby-version` and the release workflow now use Ruby 4.0.1, matching the
+  sibling gems. `required_ruby_version` stays `>= 3.4`.
+
+### Added
+
+- SimpleCov (branch coverage) in the spec suite, matching the sibling gems.
+
 ## [0.5.0] - 2026-07-30
 
 Closes the gap that had four host apps writing their own checks. The env-spec
