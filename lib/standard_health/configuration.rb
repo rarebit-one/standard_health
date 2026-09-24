@@ -192,6 +192,82 @@ module StandardHealth
       registration
     end
 
+    # The check set every consumer app registers by hand. Each entry: default
+    # registration name, criticality, the check class (a String, resolved only
+    # if the backing library is loaded), and the guard that decides whether
+    # the backing library is present.
+    DEFAULT_CHECKS = {
+      database: {
+        name: :database, critical: true,
+        klass: "StandardHealth::Checks::ActiveRecord",
+        available: -> { defined?(::ActiveRecord::Base) }
+      },
+      solid_queue: {
+        name: :solid_queue, critical: true,
+        klass: "StandardHealth::Checks::SolidQueue",
+        available: -> { defined?(::SolidQueue) }
+      },
+      solid_cache: {
+        name: :solid_cache, critical: false,
+        klass: "StandardHealth::Checks::SolidCache",
+        available: -> { defined?(::SolidCache) }
+      },
+      audit_retention: {
+        name: :audit_retention, critical: false,
+        klass: "StandardAudit::Checks::Retention",
+        available: -> { defined?(::StandardAudit::Checks::Retention) }
+      }
+    }.freeze
+
+    # Registers the estate's common check set in one call:
+    #
+    #   :database         StandardHealth::Checks::ActiveRecord  critical
+    #   :solid_queue      StandardHealth::Checks::SolidQueue    critical
+    #   :solid_cache      StandardHealth::Checks::SolidCache    non-critical
+    #   :audit_retention  StandardAudit::Checks::Retention      non-critical
+    #
+    # Note the database check registers as `:database`, not the class's own
+    # `:active_record` default — every consumer renamed it, and dashboards key
+    # on the name.
+    #
+    # A check whose backing library is not loaded (no `SolidQueue`, no
+    # `SolidCache`, no `standard_audit`) is SKIPPED, not registered-and-
+    # failing. A name that is already registered is also skipped, so calling
+    # this after (or before) hand-registering one of them never duplicates it.
+    #
+    # Each keyword takes:
+    #   true   — register with the defaults above (the default)
+    #   false  — don't register it
+    #   Hash   — register with overrides: `name:`, `critical:`, `timeout:`,
+    #            plus any constructor options (see #register_check)
+    #
+    #   c.register_default_checks solid_cache: false,
+    #                             audit_retention: { critical: false, timeout: 1 }
+    #
+    # @return [Array<Symbol>] names actually registered by this call
+    def register_default_checks(database: true, solid_queue: true, solid_cache: true, audit_retention: true)
+      requested = { database: database, solid_queue: solid_queue,
+                    solid_cache: solid_cache, audit_retention: audit_retention }
+
+      requested.filter_map do |key, setting|
+        next unless setting
+
+        overrides = setting.is_a?(Hash) ? setting.transform_keys(&:to_sym) : {}
+        default = DEFAULT_CHECKS.fetch(key)
+        next unless default[:available].call
+
+        name = (overrides.delete(:name) || default[:name]).to_sym
+        next if @checks.any? { |reg| reg.name == name }
+
+        critical = overrides.key?(:critical) ? overrides.delete(:critical) : default[:critical]
+        timeout = overrides.delete(:timeout)
+        klass = overrides.delete(:klass) || Object.const_get(default[:klass])
+
+        register_check(name, klass, critical: critical, timeout: timeout, **overrides)
+        name
+      end
+    end
+
     # @return [Array<Registration>] frozen view of registered checks
     def checks
       @checks.dup
