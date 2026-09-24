@@ -98,6 +98,38 @@ module StandardHealth
     # Prefix for emitted metric names, e.g. "health.check.duration".
     attr_accessor :metric_prefix
 
+    # Whether to register the Metrics notifier at all (0.6.0). Unlike
+    # `instrumentation_enabled`, turning this off keeps the Logger and Sentry
+    # notifiers — which carry the actual health signal — running.
+    attr_accessor :metrics_enabled
+
+    # Allow-list of event names the Metrics notifier records (0.6.0). nil (the
+    # default) records every event, as before. The per-poll events are the
+    # volume — ~2 evaluations x N checks per probe interval per instance — so
+    # a host paying for metric quota typically keeps only the rare, actionable
+    # one:
+    #
+    #   c.metric_events = %w[standard_health.check.timed_out]
+    #
+    # See `Notifiers::Metrics::EVENTS` / `PER_POLL_EVENTS`.
+    attr_reader :metric_events
+
+    def metric_events=(events)
+      if events.nil?
+        @metric_events = nil
+        return
+      end
+
+      names = Array(events).map(&:to_s)
+      unknown = names - Notifiers::Metrics::EVENTS
+      unless unknown.empty?
+        raise ArgumentError,
+              "unknown metric event(s) #{unknown.join(", ")}; known: #{Notifiers::Metrics::EVENTS.join(", ")}"
+      end
+
+      @metric_events = names.uniq.freeze
+    end
+
     # Extra `call(event_name, payload)` subscribers supplied by the host.
     attr_reader :extra_notifiers
 
@@ -166,6 +198,8 @@ module StandardHealth
       @logger = nil
       @sentry_enabled = true
       @metric_prefix = "health"
+      @metrics_enabled = true
+      @metric_events = nil
       @extra_notifiers = []
 
       @expose_check_errors = false

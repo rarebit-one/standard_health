@@ -15,18 +15,40 @@ module StandardHealth
     #
     # Sentry::Metrics is a SOFT dependency — guarded by `defined?`, never a
     # gemspec entry.
+    #
+    # Hosts that find the per-poll volume too expensive narrow it with
+    # `config.metric_events` (an allow-list, passed here as `events:`) or drop
+    # the notifier with `config.metrics_enabled = false` — both 0.6.0 — rather
+    # than prepending a filter onto this class.
     class Metrics
-      def initialize(metric_prefix: "health")
+      CHECK_COMPLETED = "standard_health.check.completed"
+      READY_EVALUATED = "standard_health.ready.evaluated"
+      CHECK_TIMED_OUT = "standard_health.check.timed_out"
+
+      # Every event this notifier records.
+      EVENTS = [CHECK_COMPLETED, READY_EVALUATED, CHECK_TIMED_OUT].freeze
+
+      # The events that fire on every probe — the metric volume.
+      PER_POLL_EVENTS = [CHECK_COMPLETED, READY_EVALUATED].freeze
+
+      # @param metric_prefix [String]
+      # @param events [Array<String>, nil] allow-list; nil records everything
+      def initialize(metric_prefix: "health", events: nil)
         @prefix = metric_prefix
+        @events = events&.map(&:to_s)&.freeze
       end
 
+      # @return [Array<String>, nil] the allow-list, or nil for "all"
+      attr_reader :events
+
       def call(event_name, payload)
+        return if @events && !@events.include?(event_name)
         return unless metrics_available?
 
         case event_name
-        when "standard_health.check.completed" then record_check(payload)
-        when "standard_health.ready.evaluated" then record_evaluation(payload)
-        when "standard_health.check.timed_out" then record_timeout(payload)
+        when CHECK_COMPLETED then record_check(payload)
+        when READY_EVALUATED then record_evaluation(payload)
+        when CHECK_TIMED_OUT then record_timeout(payload)
         end
       rescue StandardError
         # Observability must never break the health path.
