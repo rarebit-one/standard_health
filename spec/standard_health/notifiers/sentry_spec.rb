@@ -27,6 +27,13 @@ RSpec.describe StandardHealth::Notifiers::Sentry do
                   { status: status, failed: failed, duration_ms: 5 })
   end
 
+  it "ignores the aggregate tier's evaluation event (0.6.0) — it would make the transition gate flap" do
+    notifier = described_class.new
+    notifier.call("standard_health.aggregate.evaluated", { status: :unavailable, failed: [:x] })
+
+    expect(captures).to be_empty
+  end
+
   it "does nothing at all while healthy" do
     notifier = described_class.new
     5.times { evaluate(notifier, :ok) }

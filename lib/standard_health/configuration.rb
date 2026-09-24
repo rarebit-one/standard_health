@@ -31,9 +31,17 @@ module StandardHealth
         !!critical
       end
 
-      # Builds the check instance the aggregator runs.
+      # Builds the check instance the aggregator runs. A String class name is
+      # resolved here, at run time — so a host can register an autoloaded
+      # app constant (`"AttestationRootsCheck"`) from an initializer, where it
+      # is not yet resolvable, without a `to_prepare` dance; and a reloaded
+      # class in development is picked up.
       def build
-        klass.new(name: name, critical: critical, **options)
+        check_class.new(name: name, critical: critical, **options)
+      end
+
+      def check_class
+        klass.is_a?(String) ? Object.const_get(klass) : klass
       end
     end
 
@@ -94,6 +102,24 @@ module StandardHealth
     # dependency (guarded by `defined?`), so leaving this true costs nothing
     # in a host that doesn't use Sentry.
     attr_accessor :sentry_enabled
+
+    # --- Aggregate tier (0.6.0) ----------------------------------------
+    #
+    # When true, the engine serves the aggregate tier at its root — `GET
+    # /health` for the usual mount — as { status, checks, circuits,
+    # generated_at }. OFF by default: with it off the engine draws no
+    # matching route and a bare /health cascades to the host exactly as
+    # before. See `StandardHealth::AggregateReport`.
+    attr_accessor :aggregate_endpoint
+
+    # Whether the aggregate tier re-runs the readiness checks (the
+    # `register_check` registry). Default true. Set false for an aggregate
+    # that reports only circuits + `register_aggregate_check` checks.
+    attr_accessor :aggregate_readiness_checks
+
+    # Whether to fold `StandardCircuit.health_report` into the aggregate tier
+    # when StandardCircuit is loaded. Default true.
+    attr_accessor :aggregate_circuits
 
     # Prefix for emitted metric names, e.g. "health.check.duration".
     attr_accessor :metric_prefix
@@ -193,6 +219,10 @@ module StandardHealth
       @diagnostics_basic_auth = nil
       @env_spec = nil
       @checks = []
+      @aggregate_checks = []
+      @aggregate_endpoint = false
+      @aggregate_readiness_checks = true
+      @aggregate_circuits = true
 
       @instrumentation_enabled = true
       @logger = nil
@@ -322,6 +352,27 @@ module StandardHealth
       end
     end
 
+    # Register a check that runs ONLY on the aggregate tier — soft upstreams
+    # and advisories that must never gate rotation (SolidCable, certificate
+    # expiry, ...). Same signature as #register_check; `klass` may also be a
+    # String class name, resolved at run time (as it may for #register_check).
+    #
+    #   c.register_aggregate_check :solid_cable, StandardHealth::Checks::SolidCable
+    #   c.register_aggregate_check :attestation_roots, "AttestationRootsCheck"
+    def register_aggregate_check(name, klass, critical: false, timeout: nil, **options)
+      validate_check_options!(klass, options)
+      registration = Registration.new(
+        name: name.to_sym, klass: klass, critical: critical, timeout: timeout, options: options
+      )
+      @aggregate_checks << registration
+      registration
+    end
+
+    # @return [Array<Registration>] aggregate-only checks
+    def aggregate_checks
+      @aggregate_checks.dup
+    end
+
     # @return [Array<Registration>] frozen view of registered checks
     def checks
       @checks.dup
@@ -331,6 +382,7 @@ module StandardHealth
     # app and the engine share a process.
     def reset_checks!
       @checks = []
+      @aggregate_checks = []
     end
 
     # Drop host-registered notifiers. Test hygiene, mirroring reset_checks!.
@@ -346,7 +398,7 @@ module StandardHealth
     # `**kwargs` accepts anything and is not second-guessed.
     def validate_check_options!(klass, options)
       return if options.empty?
-      return unless klass.respond_to?(:instance_method)
+      return unless klass.is_a?(Module) # a String name resolves at run time
 
       params = klass.instance_method(:initialize).parameters
       return if params.any? { |type, _| type == :keyrest }

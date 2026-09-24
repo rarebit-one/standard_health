@@ -24,7 +24,16 @@ module StandardHealth
   # /ready. Instrumentation is held to the same bar — every emit is wrapped
   # so a broken subscriber cannot become a new way for /ready to 500.
   class Aggregator
-    def self.call(checks: StandardHealth.config.checks, now: Time.now.utc)
+    # @param checks [Array<Configuration::Registration>]
+    # @param now [Time]
+    # @param tier [Symbol] which endpoint is evaluating. `:ready` (the default)
+    #   emits `standard_health.ready.evaluated` exactly as before. Any other
+    #   tier (0.6.0: `:aggregate`) emits only the per-check events — tagged
+    #   with `tier:` — and leaves the evaluation event to its caller. That
+    #   matters: the Sentry notifier is transition-gated on ready.evaluated
+    #   with per-process state, so interleaving aggregate evaluations (which
+    #   can include soft checks readiness doesn't run) would make it flap.
+    def self.call(checks: StandardHealth.config.checks, now: Time.now.utc, tier: :ready)
       started = monotonic
       budget = StandardHealth.config.total_check_budget
 
@@ -36,10 +45,10 @@ module StandardHealth
           # `failed[]`, with no per-check counter — so once a budget is
           # enabled you could not answer "how often is check X getting
           # skipped", which is exactly the question a budget creates.
-          emit_check(row)
+          emit_check(row, tier)
           row
         else
-          safe_run(reg)
+          safe_run(reg, tier)
         end
       end
 
@@ -47,6 +56,8 @@ module StandardHealth
       status = overall_status(check_rows)
 
       failing = check_rows.reject { |r| r[:status] == :ok }
+
+      return { status: status, checks: check_rows, generated_at: now.iso8601 } unless tier == :ready
 
       emit(
         "standard_health.ready.evaluated",
@@ -60,15 +71,7 @@ module StandardHealth
         # is the transition-gated event, so they don't fire per poll). If the
         # message only existed on check.completed, redaction would delete the
         # last copy instead of relocating it.
-        failures: failing.map do |r|
-          {
-            name: r[:name],
-            critical: r[:critical],
-            status: r[:status],
-            error_class: r[:error_class],
-            error_message: r[:error]
-          }.compact
-        end
+        failures: failure_details(failing)
       )
 
       {
@@ -78,7 +81,22 @@ module StandardHealth
       }
     end
 
-    def self.safe_run(reg)
+    # Per-failure detail for an evaluation event. Public (but @api private) so
+    # the aggregate tier's evaluation event carries the same shape.
+    # @api private
+    def self.failure_details(failing)
+      failing.map do |r|
+        {
+          name: r[:name],
+          critical: r[:critical],
+          status: r[:status],
+          error_class: r[:error_class],
+          error_message: r[:error]
+        }.compact
+      end
+    end
+
+    def self.safe_run(reg, tier = :ready)
       timeout = reg.timeout || StandardHealth.config.default_check_timeout
       instance = reg.build
 
@@ -90,11 +108,11 @@ module StandardHealth
         end
 
       row = result.merge(name: reg.name, critical: reg.critical)
-      emit_check(row)
+      emit_check(row, tier)
       row
     rescue CheckTimeout
       emit("standard_health.check.timed_out",
-           name: reg.name, critical: reg.critical, timeout_s: timeout)
+           name: reg.name, critical: reg.critical, timeout_s: timeout, **tier_attrs(tier))
       row = {
         name: reg.name,
         critical: reg.critical,
@@ -102,7 +120,7 @@ module StandardHealth
         error: "timed out after #{timeout}s",
         error_class: "StandardHealth::CheckTimeout"
       }
-      emit_check(row)
+      emit_check(row, tier)
       row
     rescue StandardError => e
       row = {
@@ -112,7 +130,7 @@ module StandardHealth
         error: e.message,
         error_class: e.class.name
       }
-      emit_check(row)
+      emit_check(row, tier)
       row
     end
     private_class_method :safe_run
@@ -154,7 +172,7 @@ module StandardHealth
     end
     private_class_method :overall_status
 
-    def self.emit_check(row)
+    def self.emit_check(row, tier = :ready)
       emit(
         "standard_health.check.completed",
         name: row[:name],
@@ -162,12 +180,21 @@ module StandardHealth
         status: row[:status],
         latency_ms: row[:latency_ms],
         error_class: row[:error_class],
-        error_message: row[:error]
+        error_message: row[:error],
+        **tier_attrs(tier)
       )
     end
     private_class_method :emit_check
 
-    # Belt and braces on top of EventEmitter's own rescue. The never-raise
+    # Readiness payloads are left byte-for-byte as they were before tiers
+    # existed; only non-readiness tiers are labelled.
+    def self.tier_attrs(tier)
+      tier == :ready ? {} : { tier: tier }
+    end
+    private_class_method :tier_attrs
+
+    # Belt and braces on top of EventEmitter's own rescue. Honours
+    # `instrumentation_enabled`. @api private (also used by AggregateReport). The never-raise
     # rule names this file, and instrumentation is the newest way to violate
     # it — so the call site guards too.
     def self.emit(event_name, **payload)
@@ -177,7 +204,6 @@ module StandardHealth
     rescue StandardError
       nil
     end
-    private_class_method :emit
 
     def self.monotonic
       Process.clock_gettime(Process::CLOCK_MONOTONIC)

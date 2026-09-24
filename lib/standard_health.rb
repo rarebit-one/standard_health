@@ -21,6 +21,7 @@ require "standard_health/notifiers/metrics"
 require "standard_health/subscribers"
 require "standard_health/redactor"
 require "standard_health/aggregator"
+require "standard_health/aggregate_report"
 
 module StandardHealth
   class << self

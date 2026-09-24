@@ -57,6 +57,20 @@ RSpec.describe StandardHealth::Notifiers::Metrics do
       expect(calls).to eq([[:count, "health.check.timeout", { value: 1, attributes: { check: "solid_queue" } }]])
     end
 
+    it "labels aggregate-tier check counts with the tier (readiness series unchanged)" do
+      described_class.new.call("standard_health.check.completed",
+                               { name: :solid_cable, status: :ok, critical: false, tier: :aggregate })
+
+      expect(calls.first).to eq([:count, "health.check",
+                                 { value: 1, attributes: { check: "solid_cable", status: "ok", critical: "false", tier: "aggregate" } }])
+    end
+
+    it "does not record the aggregate evaluation event" do
+      described_class.new.call("standard_health.aggregate.evaluated", { status: :degraded })
+
+      expect(calls).to be_empty
+    end
+
     it "honours the metric prefix" do
       described_class.new(metric_prefix: "app.health").call(*timed_out)
 

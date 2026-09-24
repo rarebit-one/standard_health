@@ -67,4 +67,35 @@ RSpec.describe StandardHealth::Notifiers::Logger do
         .call("standard_health.ready.evaluated", { status: :degraded, failed: [] })
     }.not_to raise_error
   end
+
+  describe "aggregate tier (standard_health.aggregate.evaluated)" do
+    def aggregate(payload)
+      notifier.call("standard_health.aggregate.evaluated", payload)
+    end
+
+    it "is silent on :ok" do
+      aggregate(status: :ok, failed: [], failures: [])
+
+      expect(lines).to be_empty
+    end
+
+    it "warns on :degraded with the failing check's message and red circuits" do
+      aggregate(status: :degraded, failed: [:solid_cable],
+                failures: [{ name: :solid_cable, error_class: "PG::ConnectionBad", error_message: "refused" }],
+                red_circuits: [:maps])
+
+      level, message = lines.first
+      expect(level).to eq(:warn)
+      expect(message).to include("aggregate degraded", "solid_cable PG::ConnectionBad: refused", "circuits red: maps")
+    end
+
+    it "errors on :unavailable and carries a circuit-report failure" do
+      aggregate(status: :unavailable, failed: [], failures: [],
+                circuits_error_class: "Redis::CannotConnectError", circuits_error_message: "redis down")
+
+      level, message = lines.first
+      expect(level).to eq(:error)
+      expect(message).to include("circuit report failed: Redis::CannotConnectError: redis down")
+    end
+  end
 end

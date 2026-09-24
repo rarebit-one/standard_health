@@ -64,11 +64,11 @@ module StandardHealth
       def record_check(payload)
         name = payload[:name].to_s
         status = payload[:status].to_s
-        ::Sentry::Metrics.count(
-          "#{@prefix}.check",
-          value: 1,
-          attributes: { check: name, status: status, critical: payload[:critical].to_s }
-        )
+        attributes = { check: name, status: status, critical: payload[:critical].to_s }
+        # Only aggregate-tier (0.6.0, opt-in) evaluations carry a tier, so
+        # readiness series keep exactly the attributes they always had.
+        attributes[:tier] = payload[:tier].to_s if payload[:tier]
+        ::Sentry::Metrics.count("#{@prefix}.check", value: 1, attributes: attributes)
 
         latency = payload[:latency_ms]
         return unless latency && ::Sentry::Metrics.respond_to?(:distribution)

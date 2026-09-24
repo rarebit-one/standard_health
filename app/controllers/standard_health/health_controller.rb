@@ -25,6 +25,18 @@ module StandardHealth
              status: http_status
     end
 
+    # Aggregate tier (0.6.0, opt-in via `config.aggregate_endpoint`; the route
+    # does not match otherwise). Checks + StandardCircuit state in one body —
+    # see StandardHealth::AggregateReport. 503 only on :unavailable, i.e. a
+    # critical check failure or a :critical circuit RED. Redacted exactly like
+    # /ready, with the same break-glass.
+    def aggregate
+      report = StandardHealth::AggregateReport.call
+      http_status = report[:status] == :unavailable ? :service_unavailable : :ok
+      render json: StandardHealth::Redactor.call(report, expose: expose_errors?),
+             status: http_status
+    end
+
     private
 
     # Detail is exposed when the host opted in globally, or when the caller
