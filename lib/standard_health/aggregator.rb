@@ -80,7 +80,7 @@ module StandardHealth
 
     def self.safe_run(reg)
       timeout = reg.timeout || StandardHealth.config.default_check_timeout
-      instance = reg.klass.new(name: reg.name, critical: reg.critical)
+      instance = reg.build
 
       result =
         if timeout

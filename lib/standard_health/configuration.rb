@@ -15,9 +15,25 @@ module StandardHealth
     #
     # `timeout` is per-check seconds, or nil to fall back to
     # `default_check_timeout` (itself nil by default — see below).
-    Registration = Struct.new(:name, :klass, :critical, :timeout, keyword_init: true) do
+    #
+    # `options` are extra keyword arguments forwarded to the check's
+    # constructor alongside `name:`/`critical:` (e.g. `EnvSpecAudit`'s
+    # `fail_on:`). Empty by default, in which case the check is built exactly
+    # as it was before 0.6.0 — so a custom check whose `initialize` only takes
+    # `name:`/`critical:` never sees an unexpected keyword.
+    Registration = Struct.new(:name, :klass, :critical, :timeout, :options, keyword_init: true) do
+      def initialize(**)
+        super
+        self.options ||= {}
+      end
+
       def critical?
         !!critical
+      end
+
+      # Builds the check instance the aggregator runs.
+      def build
+        klass.new(name: name, critical: critical, **options)
       end
     end
 
@@ -158,10 +174,22 @@ module StandardHealth
     # @param critical [Boolean] failure flips overall status to :unavailable
     # @param timeout [Numeric, nil] per-check seconds; nil falls back to
     #   `default_check_timeout` (nil = no timeout)
-    def register_check(name, klass, critical: false, timeout: nil)
-      @checks << Registration.new(
-        name: name.to_sym, klass: klass, critical: critical, timeout: timeout
+    # @param options [Hash] any other keywords are forwarded to the check's
+    #   constructor, e.g.
+    #
+    #     c.register_check :env_spec, StandardHealth::Checks::EnvSpecAudit,
+    #                      fail_on: %i[forbidden]
+    #
+    #   Validated against the constructor's signature HERE, so a typo fails
+    #   at boot instead of turning into an ArgumentError on every probe (which
+    #   the aggregator would dutifully report as a failing check forever).
+    def register_check(name, klass, critical: false, timeout: nil, **options)
+      validate_check_options!(klass, options)
+      registration = Registration.new(
+        name: name.to_sym, klass: klass, critical: critical, timeout: timeout, options: options
       )
+      @checks << registration
+      registration
     end
 
     # @return [Array<Registration>] frozen view of registered checks
@@ -178,6 +206,28 @@ module StandardHealth
     # Drop host-registered notifiers. Test hygiene, mirroring reset_checks!.
     def reset_notifiers!
       @extra_notifiers = []
+    end
+
+    private
+
+    # Rejects option keys the check's constructor cannot accept. Only
+    # inspects the signature — never instantiates — so a check with side
+    # effects in `initialize` is not run at boot. A constructor taking
+    # `**kwargs` accepts anything and is not second-guessed.
+    def validate_check_options!(klass, options)
+      return if options.empty?
+      return unless klass.respond_to?(:instance_method)
+
+      params = klass.instance_method(:initialize).parameters
+      return if params.any? { |type, _| type == :keyrest }
+
+      accepted = params.select { |type, _| %i[key keyreq].include?(type) }.map(&:last)
+      unknown = options.keys.map(&:to_sym) - accepted
+      return if unknown.empty?
+
+      raise ArgumentError,
+            "#{klass} does not accept #{unknown.map { |k| "`#{k}:`" }.join(", ")}; " \
+            "its constructor takes #{accepted.map { |k| "`#{k}:`" }.join(", ")}"
     end
   end
 end
