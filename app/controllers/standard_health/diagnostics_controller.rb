@@ -27,11 +27,13 @@ module StandardHealth
       root = defined?(Rails) ? Rails.root : nil
 
       audit = spec ? spec.audit(ENV.to_h, mode: mode, root: root) : []
+      assertions = DiagnosticsAssertions.run
 
       render json: {
         mode: mode,
-        status: audit_status(audit),
+        status: audit_status(audit, assertions),
         audit: audit,
+        assertions: assertions,
         generated_at: Time.now.utc.iso8601
       }
     end
@@ -53,13 +55,16 @@ module StandardHealth
     # advice. The advisory status stays `:should_set`, which is not a
     # violation.
     #
+    # A registered diagnostics assertion (`register_diagnostics_assertion`)
+    # that reports `:error` also makes it `:incomplete`; `:warn` does not.
+    #
     # The endpoint still returns 200 either way, so nothing that asserts on
     # the status code breaks.
-    def audit_status(audit)
+    def audit_status(audit, assertions = [])
       violated = Array(audit).any? do |row|
         EnvSpec::VIOLATION_STATUSES.include?(row[:status])
       end
-      violated ? :incomplete : :ok
+      (violated || DiagnosticsAssertions.failing?(assertions)) ? :incomplete : :ok
     end
   end
 end
