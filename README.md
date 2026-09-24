@@ -130,7 +130,8 @@ A check that **raises** on this tier, rather than returning a `:fail` row, is
 also reported to `Rails.error` as handled (since 0.6.1), with context
 `{ health_check:, tier: "aggregate" }` and severity `:error` for a critical
 check or `:warning` otherwise. That matches what the pre-0.6 host controllers
-did. `/ready` does not do this: its failures reach Sentry through the
+did. Per-check timeouts are not reported; they surface as
+`standard_health.check.timed_out`. `/ready` does not do this: its failures reach Sentry through the
 transition-gated `ready.evaluated` notifier.
 
 With `aggregate_endpoint` off (the default) the engine's root route carries a

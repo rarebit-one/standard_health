@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Aggregate-tier check **timeouts** are deliberately not sent to `Rails.error` (true since 0.6.1). A timeout is the gem's own budget firing on a slow dependency, already emitted as `standard_health.check.timed_out`, and the pre-0.6 host controllers had no per-check timeouts. A code comment and a spec now pin this.
+
 ## [0.6.1] - 2026-09-24
 
 ### Fixed
