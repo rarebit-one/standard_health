@@ -15,6 +15,10 @@
 # tier silently has no aggregate tier at all — no boot error, and no failing
 # route spec unless one exists. Add a route spec for `GET /health`.
 #
+# Alternatively (0.6.0+) let the engine serve the aggregate tier itself —
+# checks plus StandardCircuit state — and draw no route at all:
+#   config.aggregate_endpoint = true
+#
 # Tiers: /alive = liveness (process up) · /ready = readiness (rotation gate)
 # /health = aggregate (dashboards) · /diagnostics/env = authed doctor.
 # ────────────────────────────────────────────────────────────────────────────
@@ -28,6 +32,10 @@ StandardHealth.configure do |config|
   # it. Setting a diagnostics-only parent lets you put auth on the doctor tier
   # without the callback leaking onto /alive and /ready.
   # config.diagnostics_parent_controller = "DiagnosticsBaseController"
+  #
+  # Or let the engine gate it with HTTP Basic (fails CLOSED — 403 — when the
+  # credentials are unset). `true` reads ADMIN_BASIC_AUTH_USERNAME/_PASSWORD.
+  # config.diagnostics_basic_auth = true
 
   # ── Checks ───────────────────────────────────────────────────────────────
   #
@@ -35,6 +43,11 @@ StandardHealth.configure do |config|
   # pulls the instance out of rotation, so `critical: true` belongs on the
   # database and little else. Soft upstreams degrade; they never gate rotation.
   config.register_check :database, StandardHealth::Checks::ActiveRecord, critical: true
+  #
+  # Or register the common set in one call — :database and :solid_queue
+  # (critical), :solid_cache and :audit_retention (non-critical), each skipped
+  # when its library isn't loaded:
+  # config.register_default_checks
   # config.register_check :cache, StandardHealth::Checks::SolidCache
   # config.register_check :queue, StandardHealth::Checks::SolidQueue
 
