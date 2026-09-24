@@ -419,11 +419,13 @@ Since 0.4.1 the response carries a `status` alongside the audit, so a caller
 can gate on one field instead of re-implementing the roll-up:
 
 ```json
-{ "mode": "production", "status": "incomplete", "audit": [ ... ] }
+{ "mode": "production", "status": "incomplete", "audit": [ ... ], "assertions": [ ... ] }
 ```
 
 `incomplete` means at least one row is a **violation** — `missing`,
-`forbidden`, or `mismatch`. `should_set` is advisory and never affects it.
+`forbidden`, or `mismatch` — or (since 0.7.0) a registered diagnostics
+assertion reported `error`. `should_set` and an assertion's `warn` are
+advisory and never affect it.
 
 The level is deliberately not consulted for `mismatch`: a `recommended` var
 declared with an `expected_value:` that does not hold is a failed assertion,
@@ -433,6 +435,56 @@ not advice.
 `status == "incomplete"` pick up the `forbidden` and `mismatch` assertions for
 free — which is why they joined this roll-up rather than getting a verdict of
 their own.
+
+### Runtime assertions: `register_diagnostics_assertion` (0.7.0)
+
+Env presence can't prove that a setting took effect. For example, the live
+`statement_timeout` may still be `0`, a rate limiter may have fallen back to
+Solid Cache, or a pinned certificate may be about to expire. Register those
+checks as assertions and the engine renders them on `/diagnostics/env` under
+`assertions:`, behind the same `diagnostics_basic_auth` gate:
+
+```ruby
+StandardHealth.configure do |c|
+  c.register_diagnostics_assertion(:statement_timeout) do
+    value = ActiveRecord::Base.connection.select_value("SHOW statement_timeout").to_s
+    { status: value.strip == "0" ? :warn : :ok, value: value, expected: "non-zero" }
+  end
+
+  # Any callable works; reference app constants inside it, not at boot.
+  c.register_diagnostics_assertion(:rate_limit_store, -> { RateLimitAssertion.call })
+end
+```
+
+```json
+{ "mode": "production", "status": "ok", "audit": [ ... ],
+  "assertions": [ { "name": "statement_timeout", "status": "ok", "value": "15s", "expected": "non-zero" } ] }
+```
+
+- The callable takes no arguments and returns a Hash with `status:` set to
+  `:ok`, `:warn` or `:error`. Other keys are rendered as-is. The gem sets
+  `name:`, and the callable can't override it.
+- An assertion that raises becomes `{ status: "error", error_class:, error: }`
+  and is reported to `Rails.error` as handled. The tier is authenticated, so
+  the message is shown. A non-Hash result or an unknown status also becomes an
+  `:error` row. One broken assertion never takes the endpoint down.
+- An `:error` row makes the top-level `status` `incomplete`. `:warn` does not.
+  The endpoint still returns 200.
+- Assertions run per request, and only on this tier, never on `/alive`,
+  `/ready` or the aggregate. They have no timeout, so keep them cheap.
+- Re-registering a name replaces it, so it is safe inside `to_prepare`.
+  `reset_diagnostics_assertions!` clears them in specs.
+- A host that keeps its own diagnostics controller can render
+  `StandardHealth::DiagnosticsAssertions.run` itself.
+
+**Replace your host code with it.** sidekick-web's
+`app/controllers/health_diagnostics_controller.rb` exists to add three
+assertions (`statement_timeout`, `rate_limit_store`, `attestation_roots`) to
+the env audit. Move each into a `register_diagnostics_assertion`, delete the
+controller, and delete its route
+(`get "/health/diagnostics/env", to: "health_diagnostics#env"` ahead of the
+engine mount). Its `rescue => e; { status: :error, error: e.message }`
+wrappers go too, because the gem does that now.
 
 ### Surfacing the audit on a health tier
 
@@ -609,11 +661,15 @@ c.diagnostics_basic_auth = {
   both, the parent's callbacks run first).
 - The request-time gate is the `StandardHealth::DiagnosticsAuthentication`
   concern, which the engine includes into its own `DiagnosticsController`.
-  sidekick-web also includes it into its own `HealthDiagnosticsController`
-  (an `ActionController::API` subclass) so that controller shares the same
-  gate. That works: the concern is a no-op until `diagnostics_basic_auth` is
-  set, and it adds one `before_action`. It is not yet a documented,
-  semver-stable extension point, so pin your minor version if you depend on it.
+  **Since 0.7.0 it is public, semver-stable API:** `include
+  StandardHealth::DiagnosticsAuthentication` into any `ActionController::API`
+  or `::Base` controller to put a host endpoint behind the same fail-closed
+  gate. The contract is the include, the one `before_action` it installs, and
+  the 401 challenge / 403 refusal behaviour. Its private method names are not
+  part of it. It is a no-op until `diagnostics_basic_auth` is set. If your
+  controller only exists to add runtime assertions, use
+  [`register_diagnostics_assertion`](#runtime-assertions-register_diagnostics_assertion-070)
+  instead and delete the controller.
 
 **Replace your host code with it.** Delete
 `app/controllers/standard_health_host_controller.rb` and the

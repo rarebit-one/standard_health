@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-24
+
+The Phase 4 release. 0.6 deprecated nothing, so nothing is removed. It adds
+the one extension point the app adoptions still needed their own controller
+for. The response of `/diagnostics/env` gains a key, and a failing assertion
+changes its `status`, so this ships as a minor.
+
+### Added
+
+- **`Configuration#register_diagnostics_assertion(name, callable = nil, &block)`**
+  adds a runtime assertion to the doctor tier. `/diagnostics/env` now renders
+  `assertions: [...]` next to `audit`. The key is always present (`[]` when
+  none are registered). Each callable returns a Hash with `status:` (`:ok` /
+  `:warn` / `:error`) plus detail keys, and the gem sets `name:`. A raise
+  becomes an `:error` row with `error_class` / `error` and is reported to
+  `Rails.error` as handled (`context: { diagnostics_assertion: name }`,
+  `source: "standard_health"`). A non-Hash result or an unknown status also
+  becomes an `:error` row. Re-registering a name replaces it (reload-safe).
+  `diagnostics_assertions` / `reset_diagnostics_assertions!` are provided.
+  Assertions never run on `/alive`, `/ready` or the aggregate tier, and stay
+  behind `diagnostics_basic_auth`.
+- **`StandardHealth::DiagnosticsAssertions.run` / `.failing?`**, public for
+  hosts that render their own diagnostics endpoint.
+
+### Changed
+
+- **`/diagnostics/env` `status` also rolls up assertions.** An `:error`
+  assertion makes it `incomplete` (`:warn` does not). The HTTP status is still
+  200. Nothing changes unless you register an assertion.
+- **`StandardHealth::DiagnosticsAuthentication` is public, semver-stable
+  API.** Including it into a host controller (as sidekick-web does) is now a
+  supported extension point: the include, its single `before_action`, and the
+  401 challenge / 403 fail-closed refusal. Its private method names are not
+  part of the contract.
+
+### Upgrade notes (0.6.x → 0.7.0)
+
+Grepped `origin/main` of sidekick-web, jumpdrive-web, fundbright-web,
+luminality-web and nutripod-web on 2026-09-24.
+
+- **No required host change.** Nothing was removed.
+- **Monitors or scripts that parse `/diagnostics/env`:** a new `assertions`
+  key appears, and `status` can become `incomplete` from an `:error`
+  assertion once you register one.
+- **sidekick-web (optional, recommended):** move the three assertions in
+  `app/controllers/health_diagnostics_controller.rb` (`statement_timeout`,
+  `rate_limit_store`, `attestation_roots`) into
+  `register_diagnostics_assertion` calls in
+  `config/initializers/standard_health.rb`. Then delete the controller and its
+  `config/routes.rb` route that shadows the engine's `/health/diagnostics/env`.
+  Keep each assertion's Hash shape. Drop the per-assertion
+  `rescue => e; { status: :error, error: e.message }`, which the gem now
+  provides (it also adds `error_class`). The response gains `status`, which
+  the host controller never rendered.
+- Other apps have no diagnostics controller of their own. Nothing to do.
+
 ### Documentation
 
 - Aggregate-tier check **timeouts** are deliberately not sent to `Rails.error` (true since 0.6.1). A timeout is the gem's own budget firing on a slow dependency, already emitted as `standard_health.check.timed_out`, and the pre-0.6 host controllers had no per-check timeouts. A code comment and a spec now pin this.

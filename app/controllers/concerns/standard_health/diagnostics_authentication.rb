@@ -7,6 +7,15 @@ module StandardHealth
   # `DiagnosticsController` only — never `HealthController` — so /alive and
   # /ready stay anonymous for orchestrator probes.
   #
+  # PUBLIC API (since 0.7.0, semver-stable): a host that serves its own
+  # diagnostics endpoint can `include StandardHealth::DiagnosticsAuthentication`
+  # into any ActionController::API or ::Base controller to put it behind the
+  # same fail-closed gate. The contract is the include, the `before_action`
+  # it installs, and the 401 challenge / 403 refusal behaviour below; the
+  # private method names are not part of it. Prefer
+  # `register_diagnostics_assertion` when all the host controller adds is
+  # assertions.
+  #
   # A NO-OP when `diagnostics_basic_auth` is unset, so hosts that gate
   # diagnostics through `diagnostics_parent_controller` see no change. Both
   # can be used together; the parent's callbacks run first.

@@ -220,6 +220,7 @@ module StandardHealth
       @env_spec = nil
       @checks = []
       @aggregate_checks = []
+      @diagnostics_assertions = []
       @aggregate_endpoint = false
       @aggregate_readiness_checks = true
       @aggregate_circuits = true
@@ -366,6 +367,51 @@ module StandardHealth
       )
       @aggregate_checks << registration
       registration
+    end
+
+    DiagnosticsAssertion = Struct.new(:name, :callable)
+
+    # Adds a runtime assertion to the doctor tier (`GET /diagnostics/env`),
+    # rendered under `assertions:` next to the env audit. For facts env
+    # presence can't prove: the live `statement_timeout`, the cache store a
+    # rate limiter actually resolved to, a pinned root's expiry. Replaces a
+    # host diagnostics controller that exists only to add these.
+    #
+    #   c.register_diagnostics_assertion(:statement_timeout) do
+    #     value = ActiveRecord::Base.connection.select_value("SHOW statement_timeout").to_s
+    #     { status: value == "0" ? :warn : :ok, value: value, expected: "non-zero" }
+    #   end
+    #
+    # The callable takes no arguments and returns a Hash with `status:`
+    # (`:ok`, `:warn` or `:error`) plus any detail keys. `name:` is set by
+    # the gem. It runs per request, on the authenticated tier only, never on
+    # /alive, /ready or the aggregate. A raise, a non-Hash, or an unknown
+    # status becomes an `:error` row (a raise is also reported to
+    # `Rails.error` as handled). An `:error` row makes the endpoint's
+    # `status` `incomplete`; `:warn` does not.
+    #
+    # Re-registering a name replaces it, so `configure` can safely re-run
+    # from `to_prepare` on reload.
+    def register_diagnostics_assertion(name, callable = nil, &block)
+      callable ||= block
+      unless callable.respond_to?(:call)
+        raise ArgumentError, "register_diagnostics_assertion(#{name.inspect}) needs a callable or a block"
+      end
+
+      assertion = DiagnosticsAssertion.new(name.to_sym, callable)
+      @diagnostics_assertions.reject! { |existing| existing.name == assertion.name }
+      @diagnostics_assertions << assertion
+      assertion
+    end
+
+    # @return [Array<DiagnosticsAssertion>] in registration order
+    def diagnostics_assertions
+      @diagnostics_assertions.dup
+    end
+
+    # Drop registered diagnostics assertions. Test hygiene.
+    def reset_diagnostics_assertions!
+      @diagnostics_assertions = []
     end
 
     # @return [Array<Registration>] aggregate-only checks
