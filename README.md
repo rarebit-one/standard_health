@@ -109,13 +109,29 @@ end
 | `degraded` | 200 | a non-critical check failed or was skipped, or the circuit roll-up is `:degraded` |
 | `ok` | 200 | otherwise |
 
+**The aggregate tier re-runs your readiness checks by default.** With
+`aggregate_readiness_checks` on (the default), every `register_check`
+registration runs here as well as on `/ready`. A failing critical check, such
+as `:database` or `:solid_queue` from `register_default_checks`, therefore turns
+`/health` into a **503 `unavailable`**, not just `/ready`. Point an uptime
+monitor at `/health` and a database outage pages as a 503. If your aggregate
+tier should only report soft signals (sidekick), set
+`aggregate_readiness_checks = false`.
+
 StandardCircuit's own word `critical` is translated to `unavailable`, so both
-tiers speak one vocabulary. `circuits` is omitted when StandardCircuit isn't
+tiers speak one vocabulary. The aggregate body never says `"critical"`. `circuits` is omitted when StandardCircuit isn't
 loaded (or `aggregate_circuits = false`); if `health_report` raises (circuit
 store down) the tier degrades and reports `circuits_error: { error_class,
 error_code }` instead of 500ing. Check rows are redacted exactly like `/ready`,
 with the same `detail_token` break-glass. `register_aggregate_check` checks
 run **only** here — never on `/ready` — and default to `critical: false`.
+
+A check that **raises** on this tier, rather than returning a `:fail` row, is
+also reported to `Rails.error` as handled (since 0.6.1), with context
+`{ health_check:, tier: "aggregate" }` and severity `:error` for a critical
+check or `:warning` otherwise. That matches what the pre-0.6 host controllers
+did. `/ready` does not do this: its failures reach Sentry through the
+transition-gated `ready.evaluated` notifier.
 
 With `aggregate_endpoint` off (the default) the engine's root route carries a
 per-request constraint that never matches, so a bare `/health` cascades to your
@@ -590,6 +606,13 @@ c.diagnostics_basic_auth = {
   nothing.
 - Off by default; independent of `diagnostics_parent_controller` (if you set
   both, the parent's callbacks run first).
+- The request-time gate is the `StandardHealth::DiagnosticsAuthentication`
+  concern, which the engine includes into its own `DiagnosticsController`.
+  sidekick-web also includes it into its own `HealthDiagnosticsController`
+  (an `ActionController::API` subclass) so that controller shares the same
+  gate. That works: the concern is a no-op until `diagnostics_basic_auth` is
+  set, and it adds one `before_action`. It is not yet a documented,
+  semver-stable extension point, so pin your minor version if you depend on it.
 
 **Replace your host code with it.** Delete
 `app/controllers/standard_health_host_controller.rb` and the

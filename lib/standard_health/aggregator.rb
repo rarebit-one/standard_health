@@ -131,9 +131,37 @@ module StandardHealth
         error_class: e.class.name
       }
       emit_check(row, tier)
+      report_raised_check(e, reg, tier)
       row
     end
     private_class_method :safe_run
+
+    # A check that RAISES (rather than returning a :fail row) on a
+    # non-readiness tier goes to `Rails.error` as handled. Before 0.6.0 every
+    # host's aggregate controller did exactly this; moving the tier into the
+    # engine left the exception only in the Logger notifier's line, so a buggy
+    # aggregate check stopped reaching the error tracker.
+    #
+    # Readiness is deliberately excluded: its failures already reach Sentry
+    # through the transition-gated `ready.evaluated` notifier, and reporting
+    # every raise from a ~6/min/instance probe would be exactly the noise that
+    # notifier exists to prevent. Severity mirrors that notifier: a critical
+    # check is an :error (it makes the tier :unavailable), otherwise :warning.
+    def self.report_raised_check(error, reg, tier)
+      return if tier == :ready
+      return unless defined?(::Rails) && ::Rails.respond_to?(:error) && ::Rails.error
+
+      ::Rails.error.report(
+        error,
+        handled: true,
+        severity: reg.critical ? :error : :warning,
+        context: { health_check: reg.name.to_s, tier: tier.to_s }
+      )
+    rescue StandardError
+      # Never-raise: a broken error subscriber must not 500 the tier.
+      nil
+    end
+    private_class_method :report_raised_check
 
     def self.budget_exhausted?(budget, started)
       return false unless budget
