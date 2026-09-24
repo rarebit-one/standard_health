@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 require "standard_health/version"
+require "standard_health/probe_paths"
 require "standard_health/engine"
+require "standard_health/diagnostics_basic_auth"
 require "standard_health/configuration"
 require "standard_health/env_spec"
 require "standard_health/check"
@@ -19,6 +21,7 @@ require "standard_health/notifiers/metrics"
 require "standard_health/subscribers"
 require "standard_health/redactor"
 require "standard_health/aggregator"
+require "standard_health/aggregate_report"
 
 module StandardHealth
   class << self

@@ -33,15 +33,11 @@ module StandardHealth
     # must not serve at all with a bad env", which is a real but rare posture
     # — and on the readiness tier it will pull instances. Know which you want.
     #
-    # To narrow what counts as a failure, or to make it critical, subclass —
-    # the aggregator instantiates checks with `name:`/`critical:` only, so
-    # per-registration options are not available:
+    # To narrow what counts as a failure, pass `fail_on:` at registration
+    # (0.6.0+ forwards extra `register_check` keywords to the constructor):
     #
-    #   class StrictEnvSpec < StandardHealth::Checks::EnvSpecAudit
-    #     def initialize(name: :env_spec, critical: false)
-    #       super(name: name, critical: critical, fail_on: %i[forbidden])
-    #     end
-    #   end
+    #   c.register_check :env_spec, StandardHealth::Checks::EnvSpecAudit,
+    #                    fail_on: %i[forbidden]
     class EnvSpecAudit < Check
       # Reported as `error_class` so the redacted body carries a groupable
       # `error_code` (`standard_health_env_spec_violation`) instead of a

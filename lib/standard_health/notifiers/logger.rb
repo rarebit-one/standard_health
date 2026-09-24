@@ -24,6 +24,7 @@ module StandardHealth
         case event_name
         when "standard_health.ready.evaluated" then log_evaluation(payload)
         when "standard_health.check.timed_out" then log_timeout(payload)
+        when "standard_health.aggregate.evaluated" then log_aggregate(payload)
         end
       end
 
@@ -61,6 +62,24 @@ module StandardHealth
         when :unavailable then emit_log(:error, message)
         else emit_log(:warn, message)
         end
+        message
+      end
+
+      # The aggregate tier (0.6.0, opt-in). Same silent-on-ok rule; this is
+      # where an aggregate-only check's redacted message and a circuit store
+      # failure end up.
+      def log_aggregate(payload)
+        status = payload[:status]
+        return if status.nil? || status.to_sym == :ok
+
+        circuits = Array(payload[:red_circuits])
+        message = +"[StandardHealth] aggregate #{status}#{detail(payload)}"
+        message << " — circuits red: #{circuits.join(", ")}" unless circuits.empty?
+        if payload[:circuits_error_class]
+          message << " — circuit report failed: #{payload[:circuits_error_class]}: #{payload[:circuits_error_message]}"
+        end
+
+        emit_log(status.to_sym == :unavailable ? :error : :warn, message)
         message
       end
 

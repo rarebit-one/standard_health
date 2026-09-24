@@ -7,6 +7,7 @@ Mount it once and you get:
 - `GET /health/alive` — liveness probe (always 200 if Rails is up)
 - `GET /health/ready` — readiness probe; runs every registered check and rolls them up into an overall status
 - `GET /health/diagnostics/env` — audits the host app's `ENV` against a declarative spec
+- `GET /health` — *opt-in* aggregate tier: checks plus StandardCircuit state (see [below](#let-the-engine-serve-the-aggregate-tier-060))
 
 Built-in checks cover ActiveRecord, SolidQueue, and SolidCache. Host apps can register additional checks via the configuration block.
 
@@ -45,9 +46,9 @@ This wires up:
 
 ### The aggregate `GET /health` is yours to draw — before the mount
 
-**The engine draws sub-paths only.** There is no `GET /health` in
-`config/routes.rb` here; the aggregate tier is the host's responsibility, and
-the ordering is not optional:
+**Unless you opt into [`aggregate_endpoint`](#let-the-engine-serve-the-aggregate-tier-060)
+(0.6.0), the engine serves no bare `GET /health`.** The aggregate tier is then
+the host's responsibility, and the ordering is not optional:
 
 ```ruby
 get "/health", to: "health_aggregate#show"          # aggregate — FIRST
@@ -79,6 +80,74 @@ Readiness gates **only** on hard infra the app owns. A soft upstream that
 degrades must not pull an instance out of rotation — put those on the aggregate
 tier instead.
 
+### Let the engine serve the aggregate tier (0.6.0)
+
+Instead of drawing the aggregate route yourself, opt in and the engine serves
+it at its root:
+
+```ruby
+StandardHealth.configure do |c|
+  c.aggregate_endpoint = true
+  # c.aggregate_readiness_checks = true    # default: re-run the register_check registry
+  # c.aggregate_circuits = true            # default: fold StandardCircuit.health_report in, when loaded
+  c.register_aggregate_check :solid_cable, StandardHealth::Checks::SolidCable  # aggregate-ONLY
+end
+```
+
+```json
+{ "status": "degraded",
+  "checks":   [{ "name": "database", "critical": true, "status": "ok", "latency_ms": 2 },
+               { "name": "solid_cable", "critical": false, "status": "fail",
+                 "error_class": "PG::ConnectionBad", "error_code": "pg_connection_bad" }],
+  "circuits": [{ "name": "google_oauth", "color": "green", "locked": false, "criticality": "critical" }],
+  "generated_at": "2026-09-24T00:00:00Z" }
+```
+
+| Status | HTTP | When |
+|---|---|---|
+| `unavailable` | 503 | a critical check failed, or a `:critical` circuit is red |
+| `degraded` | 200 | a non-critical check failed or was skipped, or the circuit roll-up is `:degraded` |
+| `ok` | 200 | otherwise |
+
+StandardCircuit's own word `critical` is translated to `unavailable`, so both
+tiers speak one vocabulary. `circuits` is omitted when StandardCircuit isn't
+loaded (or `aggregate_circuits = false`); if `health_report` raises (circuit
+store down) the tier degrades and reports `circuits_error: { error_class,
+error_code }` instead of 500ing. Check rows are redacted exactly like `/ready`,
+with the same `detail_token` break-glass. `register_aggregate_check` checks
+run **only** here — never on `/ready` — and default to `critical: false`.
+
+With `aggregate_endpoint` off (the default) the engine's root route carries a
+per-request constraint that never matches, so a bare `/health` cascades to your
+own route exactly as before. Once on, the engine answers `/health` regardless
+of where your own route is drawn relative to the mount.
+
+**Migration** — replace your host code with the flag:
+
+- **fundbright / nutripod / jumpdrive** (`get "/health", to: "standard_circuit/health#show"`):
+  set `c.aggregate_endpoint = true`, delete that route (and the
+  `require "standard_circuit/health_controller"` if nothing else uses it —
+  fundbright's `/circuits` alias still does). The body gains `checks[]`, and
+  a red critical circuit reports `"unavailable"` rather than `"critical"`
+  (still 503). Update any dashboard or monitor matching on `"critical"`.
+- **luminality** (`HealthAggregateController` merging `Aggregator` + circuits):
+  set the flag, delete the route and the controller. Same envelope and status
+  words — it is this controller.
+- **sidekick** (`HealthAggregateController` with soft checks only):
+
+  ```ruby
+  c.aggregate_endpoint = true
+  c.aggregate_readiness_checks = false   # sidekick's aggregate never re-ran readiness
+  c.register_aggregate_check :solid_cable, StandardHealth::Checks::SolidCable
+  c.register_aggregate_check :attestation_roots, "AttestationRootsCheck"  # String: resolved per request
+  ```
+
+  then delete the route and the controller. Status words move from
+  `critical` to `unavailable`, as above.
+
+Aggregate evaluations emit `standard_health.aggregate.evaluated`, **not**
+`ready.evaluated` — see [Instrumentation](#instrumentation).
+
 ## Configuration
 
 Create `config/initializers/standard_health.rb` (or let the generator write it):
@@ -104,6 +173,40 @@ StandardHealth.configure do |c|
   end
 end
 ```
+
+### `register_default_checks` (0.6.0)
+
+Every consumer registers the same set by hand. One call does it:
+
+```ruby
+# replaces:
+#   c.register_check :database,        StandardHealth::Checks::ActiveRecord, critical: true
+#   c.register_check :solid_queue,     StandardHealth::Checks::SolidQueue,   critical: true
+#   c.register_check :solid_cache,     StandardHealth::Checks::SolidCache,   critical: false
+#   c.register_check :audit_retention, StandardAudit::Checks::Retention,     critical: false
+c.register_default_checks
+```
+
+| Key | Registered as | Class | `critical` | Skipped unless |
+|---|---|---|---|---|
+| `database` | `:database` | `Checks::ActiveRecord` | `true` | `ActiveRecord::Base` is loaded |
+| `solid_queue` | `:solid_queue` | `Checks::SolidQueue` | `true` | `SolidQueue` is loaded |
+| `solid_cache` | `:solid_cache` | `Checks::SolidCache` | `false` | `SolidCache` is loaded |
+| `audit_retention` | `:audit_retention` | `StandardAudit::Checks::Retention` | `false` | `standard_audit` is loaded |
+
+A check whose backing library isn't loaded is skipped rather than registered
+to fail forever. A name that's already registered is skipped too, so it's safe
+to mix with hand-registered checks (in either order) and to call twice. Each
+key takes `true` (defaults), `false` (skip), or a Hash of overrides —
+`name:`, `critical:`, `timeout:`, plus any [constructor options](#custom-checks):
+
+```ruby
+c.register_default_checks solid_cache: false,                 # jumpdrive: has SolidCache, doesn't check it
+                          solid_queue: { timeout: 2 }
+```
+
+Returns the names it registered. Check order in the response follows
+registration order.
 
 ## EnvSpec
 
@@ -350,6 +453,32 @@ end
 
 `with_timing` captures `latency_ms` on success and converts any `StandardError` into `{ status: :fail, error: <message> }`.
 
+**Per-registration options (0.6.0).** Keywords other than `critical:` and
+`timeout:` are forwarded to the check's constructor, and validated against its
+signature at registration — a typo fails at boot, not on every probe:
+
+```ruby
+class QueueDepthCheck < StandardHealth::Check
+  def initialize(name:, critical: false, max_depth: 1_000)
+    super(name: name, critical: critical)
+    @max_depth = max_depth
+  end
+  # ...
+end
+
+c.register_check :queue_depth, QueueDepthCheck, max_depth: 5_000
+```
+
+**String class names.** `klass` may be a String, resolved each time the check
+runs. That lets an initializer register an autoloaded app constant (which isn't
+resolvable yet at initializer time) without a `to_prepare` block, and picks up
+class reloads in development. An unresolvable name reports a failing row
+(`error_class: "NameError"`) rather than raising.
+
+```ruby
+c.register_check :runner, "RunnerHealthCheck"
+```
+
 **A check must never raise.** `Aggregator` rescues `StandardError` per check, so a buggy check degrades to `:fail` rather than 500ing the endpoint — but don't rely on that as the only line of defence. Route fallible work through `with_timing`.
 
 ## Opt-in checks
@@ -407,15 +536,12 @@ still serving traffic correctly, and de-rotating it converts a warning into an
 outage. Registering it `critical: true` asserts "this app must not serve at all
 with a bad env" — a real but rare posture. Know which you want.
 
-The aggregator instantiates checks with `name:`/`critical:` only, so to narrow
-what counts as a failure, subclass:
+To narrow what counts as a failure, pass `fail_on:` at registration (0.6.0+
+forwards it to the constructor — no subclass needed):
 
 ```ruby
-class ForbiddenTogglesOnly < StandardHealth::Checks::EnvSpecAudit
-  def initialize(name: :forbidden_toggles, critical: false)
-    super(name: name, critical: critical, fail_on: %i[forbidden])
-  end
-end
+c.register_check :forbidden_toggles, StandardHealth::Checks::EnvSpecAudit,
+                 fail_on: %i[forbidden]
 ```
 
 Note the failure message is subject to [redaction](#failure-detail-is-redacted)
@@ -427,9 +553,60 @@ Sentry. The row carries a stable `error_class` of
 
 ## Auth
 
-`/alive` and `/ready` are typically left open for orchestrator probes. `/diagnostics/env` enumerates which env vars are missing — that's potentially sensitive, so the host app is responsible for protecting it.
+`/alive` and `/ready` are typically left open for orchestrator probes. `/diagnostics/env` enumerates which env vars are missing — that's potentially sensitive, so it must be protected.
 
-The recommended pattern is to point `parent_controller` at a host app controller that enforces auth:
+### Built-in basic auth for diagnostics (0.6.0)
+
+The simplest option is to let the engine gate it:
+
+```ruby
+StandardHealth.configure do |c|
+  c.diagnostics_basic_auth = true   # ADMIN_BASIC_AUTH_USERNAME / ADMIN_BASIC_AUTH_PASSWORD
+end
+```
+
+or, with your own credential source (Strings or callables, resolved **per
+request**, so rotation needs no restart):
+
+```ruby
+c.diagnostics_basic_auth = {
+  username: -> { Current.config.admin_basic_auth_username },
+  password: -> { Current.config.admin_basic_auth_password },
+  realm: "Health Diagnostics",                                  # default
+  allow_unconfigured: -> { Rails.env.local? }                   # default: false
+}
+```
+
+- Only `/diagnostics/env` is gated; `/alive`, `/ready` and the aggregate tier stay anonymous.
+- **Fails closed.** If either credential resolves blank (or the lookup raises),
+  the endpoint answers **403** `{"error":"diagnostics refused", ...}` rather
+  than serving env state. 403, not 503: DigitalOcean App Platform's edge
+  replaces an app 5xx with its own error page, which reads as "app down". Not
+  401: there are no credentials that could succeed. `allow_unconfigured`
+  (boolean or callable) opts a credential-less environment — typically local
+  dev — into passing through.
+- Both halves are compared with `secure_compare` over SHA-256 digests, so a
+  wrong username still costs a password comparison and differing lengths leak
+  nothing.
+- Off by default; independent of `diagnostics_parent_controller` (if you set
+  both, the parent's callbacks run first).
+
+**Replace your host code with it.** Delete
+`app/controllers/standard_health_host_controller.rb` and the
+`c.diagnostics_parent_controller = "StandardHealthHostController"` line, then:
+
+| App | Was | Set |
+|---|---|---|
+| jumpdrive | fail-closed 403 on unset `ADMIN_BASIC_AUTH_*` | `c.diagnostics_basic_auth = true` |
+| sidekick | 503 when unset in staging/preview/production, open locally | `c.diagnostics_basic_auth = { allow_unconfigured: -> { !%w[staging preview production].include?(ENV["APP_ENVIRONMENT"]) } }` |
+| fundbright, luminality | open when unset (boot-enforced in deployed envs) | `c.diagnostics_basic_auth = { allow_unconfigured: -> { Rails.env.local? } }` |
+| nutripod | `Current.config.admin_basic_auth_*` | `c.diagnostics_basic_auth = { username: -> { Current.config.admin_basic_auth_username }, password: -> { Current.config.admin_basic_auth_password }, allow_unconfigured: -> { Rails.env.local? } }` |
+
+(Sidekick moves from 503 to 403 on a missing gate — see above for why.)
+
+### Bring your own parent controller
+
+The pre-0.6.0 pattern is to point `parent_controller` at a host app controller that enforces auth:
 
 ```ruby
 # app/controllers/internal_health_controller.rb
@@ -490,6 +667,53 @@ Now `/health/alive` and `/health/ready` are unauthenticated (probe-friendly) whi
 
 When `diagnostics_parent_controller` is unset, `DiagnosticsController` falls back to `parent_controller`, matching v0.1.0 behavior exactly.
 
+## Probe paths (0.6.0)
+
+Hosts copy the probe regex into `production.rb` and their Sentry samplers. The
+gem now owns it, built from the same `PROBE_ACTIONS` list its routes are drawn
+from, so it cannot drift:
+
+```ruby
+StandardHealth::PROBE_PATHS
+# => matches /up, /health, /health/alive, /health/ready (optional trailing /)
+#    never /health/diagnostics/env, never /healthy-habits
+StandardHealth.probe_path?(path)                    # predicate, same default
+StandardHealth.probe_path?(path, mount: "/_status") # engine mounted elsewhere
+```
+
+Anchored at both ends. The doctor tier is deliberately excluded — it's authed,
+hit by on-call rather than on a timer, and belongs in logs and APM.
+
+**If you mount the engine anywhere but `/health`, `PROBE_PATHS` is wrong for
+you** — call `probe_path?(path, mount: "/your-prefix")` or build your own with
+`StandardHealth.probe_path_pattern(mount:, up: true, aggregate: true, extra: [])`.
+`aggregate: false` reproduces the old exact set without the bare `/health`;
+`extra:` adds exact paths such as fundbright's `/circuits` alias.
+
+Replace your host code with it:
+
+```ruby
+# config/environments/production.rb
+# was: %r{\A/(up|health/(alive|ready))\z}  (x3 in fundbright/luminality/nutripod)
+config.silence_healthcheck_path = StandardHealth::PROBE_PATHS
+config.x.silence_console_paths  = [StandardHealth::PROBE_PATHS]   # luminality/sidekick
+config.ssl_options = { redirect: { exclude: ->(r) { StandardHealth.probe_path?(r.path) } } }
+config.host_authorization = { exclude: ->(r) { StandardHealth.probe_path?(r.path) } }
+
+# config/initializers/sentry.rb traces_sampler
+# was: Sentry::ProbePaths.probe?(path) (lib/sentry/probe_paths.rb in
+#      fundbright/luminality/sidekick) or SentryTracesSampler#health_or_stream?
+#      in jumpdrive, or the inline start_with? in nutripod
+return 0.0 if StandardHealth.probe_path?(rack_env["PATH_INFO"])
+return 0.0 if StandardHealth.probe_path?(path, extra: ["/circuits"])   # fundbright
+```
+
+Note the difference from the samplers' segment-prefix match: this is an
+**exact** match on the probe routes the engine actually serves, so a future
+`/health/<something>` sub-route is covered by a gem release rather than by a
+prefix. Paths the gem doesn't serve (sidekick's `/api/v1/provisioning/health`)
+go in `extra:`.
+
 ## Status semantics
 
 `/ready` returns:
@@ -537,7 +761,14 @@ The gem emits events on whichever bus is live — `Rails.event` on Rails 8.1+,
 |---|---|
 | `standard_health.check.completed` | `name`, `critical`, `status`, `latency_ms`, `error_class`, `error_message` |
 | `standard_health.check.timed_out` | `name`, `critical`, `timeout_s` |
-| `standard_health.ready.evaluated` | `status`, `duration_ms`, `failed[]` |
+| `standard_health.ready.evaluated` | `status`, `duration_ms`, `failed[]`, `failures[]` |
+| `standard_health.aggregate.evaluated` | `status`, `duration_ms`, `failed[]`, `failures[]`, `circuits_status`, `red_circuits[]` (0.6.0, only with `aggregate_endpoint`) |
+
+Checks run by the aggregate tier also emit `check.completed` / `check.timed_out`,
+carrying `tier: :aggregate`; readiness payloads carry no `tier` key, exactly as
+before 0.6.0. The aggregate evaluation deliberately gets its **own** event:
+the Sentry notifier keeps per-process transition state on `ready.evaluated`,
+and an aggregate that includes soft checks would make it flap.
 
 Three subscribers are registered automatically. Their noise profiles differ on
 purpose, because health events are **polls**, not state transitions — a 10s
@@ -551,7 +782,38 @@ probe period means ~6 evaluations/minute/instance:
   poll would turn a five-minute outage into ~30 duplicate issues. Sentry is a
   soft dependency; no gemspec entry.
 - **Metrics** — every poll, deliberately. Counters plus latency
-  distributions are what make `latency_ms` chartable.
+  distributions are what make `latency_ms` chartable. Aggregate-tier check
+  counts carry a `tier` attribute.
+
+The Logger also reports `aggregate.evaluated` (silent on ok); Sentry and
+Metrics ignore it.
+
+### Narrowing metrics (0.6.0)
+
+The per-poll events are the metric volume (~2 evaluations × N checks per probe
+interval per instance). To keep the rare, actionable timeout metric and drop
+the per-poll firehose:
+
+```ruby
+c.metric_events = %w[standard_health.check.timed_out]
+# or equivalently:
+c.metric_events = StandardHealth::Notifiers::Metrics::EVENTS -
+                  StandardHealth::Notifiers::Metrics::PER_POLL_EVENTS
+```
+
+or drop the Metrics notifier entirely — unlike `instrumentation_enabled =
+false`, this keeps the Logger and Sentry notifiers:
+
+```ruby
+c.metrics_enabled = false
+```
+
+`metric_events` is an allow-list (nil, the default, records everything) and
+unknown names raise at boot. **Replace your host code with it:** sidekick's
+`config/initializers/standard_health_metrics.rb` (the
+`StandardHealthPollMetricSuppression` prepend) becomes the first snippet above;
+its spec's "is patched with the suppression module" example goes, the
+behavioural examples stay.
 
 ```ruby
 StandardHealth.configure do |c|
@@ -559,6 +821,8 @@ StandardHealth.configure do |c|
   c.logger        = Rails.logger      # default: Rails.logger
   c.sentry_enabled = true             # default
   c.metric_prefix  = "health"         # default
+  c.metrics_enabled = true            # default (0.6.0)
+  c.metric_events   = nil             # default: all (0.6.0)
 
   c.add_notifier(MyNotifier.new)      # must respond to call(event_name, payload)
 end

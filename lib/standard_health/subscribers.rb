@@ -74,7 +74,9 @@ module StandardHealth
       config = StandardHealth.config
       list = [Notifiers::Logger.new(config.logger)]
       list << Notifiers::Sentry.new if config.sentry_enabled
-      list << Notifiers::Metrics.new(metric_prefix: config.metric_prefix)
+      if config.metrics_enabled
+        list << Notifiers::Metrics.new(metric_prefix: config.metric_prefix, events: config.metric_events)
+      end
       list
     end
 

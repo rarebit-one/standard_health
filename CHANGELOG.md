@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-24
+
+DX release: absorbs the code every consumer app copy-pasted around the engine.
+Everything is **additive and opt-in** — no default changes, no existing route
+returns anything different, and readiness event payloads are byte-identical —
+so this is a pure `bundle update` for consumers on `~> 0.5`. Each feature's
+README section has a "replace your host code with" snippet.
+
+### Added
+
+- `config.diagnostics_basic_auth` — built-in HTTP Basic gate for
+  `/diagnostics/env`. `true` uses `ADMIN_BASIC_AUTH_USERNAME` /
+  `ADMIN_BASIC_AUTH_PASSWORD`; a Hash takes `username:` / `password:`
+  (String or callable, resolved per request), `realm:` (default
+  "Health Diagnostics") and `allow_unconfigured:` (default false). **Fails
+  closed** with a 403 when credentials are blank or their lookup raises;
+  secure_compare over digests on both halves. Replaces each app's
+  `StandardHealthHostController` + `diagnostics_parent_controller` wiring.
+- `Configuration#register_default_checks` — registers `:database`
+  (ActiveRecord, critical), `:solid_queue` (critical), `:solid_cache` and
+  `:audit_retention` (non-critical), skipping any whose backing library isn't
+  loaded or whose name is already registered. Per-check `false` or override
+  Hash (`name:`, `critical:`, `timeout:`, constructor options).
+- `StandardHealth::PROBE_PATHS`, `StandardHealth.probe_path?(path, mount:,
+  up:, aggregate:, extra:)` and `probe_path_pattern` — the orchestrator probe
+  regex (`/up`, `/health`, `/health/alive`, `/health/ready`), built from
+  `StandardHealth::PROBE_ACTIONS`, which the engine's routes are now drawn
+  from. Excludes the doctor tier.
+- `config.metrics_enabled` (drop only the Metrics notifier) and
+  `config.metric_events` (allow-list of event names, validated at boot);
+  `Notifiers::Metrics::EVENTS` / `PER_POLL_EVENTS`. Replaces sidekick-web's
+  `StandardHealthPollMetricSuppression` prepend.
+- `register_check` forwards extra keywords to the check constructor (e.g.
+  `EnvSpecAudit`'s `fail_on:`), validated against its signature at
+  registration. `klass` may also be a String, resolved when the check runs.
+- Opt-in aggregate tier: `config.aggregate_endpoint = true` serves
+  `{ status, checks, circuits, generated_at }` at the engine root (`GET
+  /health`), folding in `StandardCircuit.health_report` when loaded
+  (`aggregate_circuits`), the readiness checks (`aggregate_readiness_checks`)
+  and aggregate-only checks (`register_aggregate_check`). 503 only on
+  `unavailable` (a critical check failure or a `:critical` circuit red);
+  redacted like `/ready`. The route is constrained per request, so with the
+  flag off a bare `/health` still cascades to the host. Emits
+  `standard_health.aggregate.evaluated` (logged; ignored by Sentry and
+  Metrics) and tags aggregate-run check events with `tier: :aggregate`.
+- Specs for `Checks::SolidQueue`, `Checks::SolidCache`, `Notifiers::Metrics`,
+  `Subscribers` and `EventEmitter`.
+
+### Changed
+
+- `Checks::EnvSpecAudit` docs: narrow with `fail_on:` at registration instead
+  of subclassing (subclassing still works).
+
 ## [0.5.1] - 2026-09-24
 
 CI and tooling only — no runtime code changes, so this is a pure
