@@ -91,6 +91,21 @@ RSpec.describe StandardHealth::AggregateReport do
       expect(Rails.error).not_to have_received(:report)
     end
 
+    it "is not reported when the check times out (a latency signal, not a code error)" do
+      slow_check = Class.new(StandardHealth::Check) do
+        def run
+          sleep 1
+          { status: :ok }
+        end
+      end
+      StandardHealth.config.register_aggregate_check(:slow, slow_check, timeout: 0.05)
+
+      row = described_class.call[:checks].first
+
+      expect(row).to include(name: :slow, status: :fail, error_class: "StandardHealth::CheckTimeout")
+      expect(Rails.error).not_to have_received(:report)
+    end
+
     it "is not reported when the check returns a :fail row instead of raising" do
       StandardHealth.config.register_aggregate_check(:soft, fail_check)
 

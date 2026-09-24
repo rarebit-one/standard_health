@@ -111,6 +111,12 @@ module StandardHealth
       emit_check(row, tier)
       row
     rescue CheckTimeout
+      # Deliberately NOT sent to Rails.error (unlike the StandardError branch
+      # below). A timeout is our own budget firing on a slow dependency, not a
+      # bug in the check: it is already visible as `check.timed_out` and as a
+      # failing row, and reporting it per poll would page on latency. The
+      # pre-0.6 host aggregate controllers had no per-check timeouts, so
+      # nothing reported there is lost.
       emit("standard_health.check.timed_out",
            name: reg.name, critical: reg.critical, timeout_s: timeout, **tier_attrs(tier))
       row = {
