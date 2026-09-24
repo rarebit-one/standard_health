@@ -2,6 +2,7 @@
 
 require "standard_health/version"
 require "standard_health/engine"
+require "standard_health/diagnostics_basic_auth"
 require "standard_health/configuration"
 require "standard_health/env_spec"
 require "standard_health/check"

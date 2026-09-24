@@ -56,6 +56,25 @@ module StandardHealth
     # `parent_controller` — fully backward-compatible with v0.1.0.
     attr_accessor :diagnostics_parent_controller
 
+    # Built-in HTTP Basic gate for `/diagnostics/env` (0.6.0). Replaces the
+    # host-side `StandardHealthHostController` + `diagnostics_parent_controller`
+    # pattern. OFF (nil) by default — nothing changes until a host opts in.
+    #
+    #   c.diagnostics_basic_auth = true   # ADMIN_BASIC_AUTH_USERNAME / _PASSWORD
+    #   c.diagnostics_basic_auth = {
+    #     username: -> { Rails.application.credentials.dig(:diagnostics, :username) },
+    #     password: -> { Rails.application.credentials.dig(:diagnostics, :password) },
+    #     realm: "Health Diagnostics",          # default
+    #     allow_unconfigured: -> { Rails.env.local? } # default false: FAIL CLOSED
+    #   }
+    #
+    # Reads back as a `StandardHealth::DiagnosticsBasicAuth` (or nil).
+    attr_reader :diagnostics_basic_auth
+
+    def diagnostics_basic_auth=(value)
+      @diagnostics_basic_auth = DiagnosticsBasicAuth.build(value)
+    end
+
     # An optional `StandardHealth::EnvSpec` instance describing required and
     # recommended environment variables for the host app. Audited via the
     # /diagnostics/env endpoint.
@@ -139,6 +158,7 @@ module StandardHealth
     def initialize
       @parent_controller = "ActionController::API"
       @diagnostics_parent_controller = nil
+      @diagnostics_basic_auth = nil
       @env_spec = nil
       @checks = []
 

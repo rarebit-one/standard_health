@@ -11,7 +11,12 @@ module StandardHealth
   # `before_action :auth, only: :env` on a dedicated diagnostics parent —
   # without that callback leaking onto `HealthController` and tripping
   # Rails 7.1's `raise_on_missing_callback_actions`.
+  #
+  # Or, since 0.6.0, set `config.diagnostics_basic_auth` and let the engine
+  # gate it (fail-closed) — see `DiagnosticsAuthentication`.
   class DiagnosticsController < DiagnosticsApplicationController
+    include DiagnosticsAuthentication
+
     # Audits the configured EnvSpec against the current process ENV and
     # returns the result as JSON. When no EnvSpec is configured the
     # endpoint returns an empty audit rather than a 404 so callers don't
