@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-24
+
+### Fixed
+
+- **A check that raises on the aggregate tier is reported to `Rails.error` again.** Before 0.6.0 every host's aggregate controller rescued a raising check and called `Rails.error.report(e, handled: true, ...)`. When the engine took over the tier, the exception was only logged by the Logger notifier, so a buggy aggregate check stopped reaching Sentry (noted in the jumpdrive-web and sidekick-web adoptions). The Aggregator now reports it as handled with context `{ health_check: <name>, tier: "aggregate" }`. Severity follows the readiness Sentry notifier: `:error` for a critical check, `:warning` otherwise. The readiness tier is unchanged. Its failures still reach Sentry through the transition-gated `ready.evaluated` notifier, which keeps a ~6/min probe from flooding the tracker. Checks that return a `:fail` row (every built-in check) are not reported. The report is rescued, so a broken error subscriber cannot 500 the tier.
+
+### Documentation
+
+- The aggregate tier re-runs the `register_check` readiness checks by default (`aggregate_readiness_checks = true`), so a failing critical check (database, Solid Queue) makes `/health` answer **503 `unavailable`**, not only `/ready`.
+- The aggregate body reports `"unavailable"`, never StandardCircuit's `"critical"`. Monitors matching on `"critical"` need updating (as noted in 0.6.0's migration notes).
+- `StandardHealth::DiagnosticsAuthentication` is the request-time gate behind `diagnostics_basic_auth`. The README now notes that a host can include it into its own diagnostics controller, as sidekick-web does. It is not yet a documented, semver-stable extension point.
+
 ## [0.6.0] - 2026-09-24
 
 DX release: absorbs the code every consumer app copy-pasted around the engine.
