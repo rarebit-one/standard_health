@@ -7,10 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-25
+
+### Fixed
+
+- **Skipped checks no longer degrade the aggregate.** A check that returns
+  `status: :skipped` itself means "not applicable here" (the feature it
+  covers is not configured or not enforced). It is now **neutral** in the
+  roll-up on every tier (`/ready` and the aggregate `/health`): it neither
+  degrades nor fails the status. Before, it counted like a failing
+  non-critical check, which held sidekick-web's `/health` at `degraded`
+  permanently while attestation was unconfigured. The row still renders in
+  `checks[]` with `"status": "skipped"`, and `check.completed` still fires,
+  so it stays visible. It is no longer listed in the `failed[]` / `failures`
+  of `ready.evaluated` / `aggregate.evaluated`, so the Logger and Sentry
+  notifiers don't name it as failing when something else degrades.
+- **A critical check that reports `:skipped` is neutral too**, on purpose.
+  "Not applicable" says nothing about whether the instance can serve, so it
+  must not pull it out of rotation. Return `:fail` for a state that should
+  page.
+- Real failures roll up exactly as before: a failing critical check is
+  `unavailable` (503), a failing non-critical one `degraded`, including
+  alongside a skipped check.
+- **Budget skips are unchanged.** A check the `total_check_budget` never
+  reached was not performed, which is not the same as healthy. It still
+  floors the roll-up at `degraded` (never `unavailable`) and is still listed
+  in `failed[]`. Its row now carries `budget_exhausted: true`, which is how
+  the gem tells the two kinds of skip apart.
+- `/diagnostics/env` is unaffected. Its roll-up is over env-audit rows and
+  assertions (`:ok` / `:warn` / `:error`), which have no skipped state.
+
 ### Changed
 
 - **Requires Rails 8.1** (`rails >= 8.1`, was `>= 8.0`). Every consumer app
   runs 8.1; 8.0 was never exercised in CI. Ruby 3.4 remains supported.
+
+### Upgrade notes (0.7.0 → 0.7.1)
+
+- **No required host change.** An app whose aggregate was `degraded` only
+  because of a self-reported skip now reports `ok`. Monitors or smoke tests
+  that expect `degraded` in that state need updating (sidekick-web).
 
 ## [0.7.0] - 2026-09-24
 

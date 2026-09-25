@@ -34,6 +34,9 @@ checks or the aggregator.
 - at least one **non-critical** check failed → **`:degraded`** (still serving —
   page someone, but stay in rotation)
 - at least one **critical** check failed → **`:unavailable`** (pull from rotation)
+- a check that **reports `:skipped` itself** is neutral (not applicable) — it
+  counts toward neither, critical or not; a **budget** skip
+  (`budget_exhausted: true`) floors at `:degraded`, never `:unavailable`
 
 `:degraded` vs `:unavailable` is driven entirely by each check's `critical:`
 flag. Getting this wrong changes rotation behaviour in production.

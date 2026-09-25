@@ -14,10 +14,22 @@ module StandardHealth
   # Runs all registered checks and rolls them up into a single status.
   #
   # Status semantics:
-  #   :ok           — every check returned :ok
+  #   :ok           — every check returned :ok, or reported :skipped itself
   #   :degraded     — at least one non-critical check failed, OR a check was
   #                   skipped because the total budget ran out
   #   :unavailable  — at least one critical check failed
+  #
+  # Two kinds of :skipped row exist, and they roll up differently (0.7.1):
+  #
+  #   * A check that RETURNS `status: :skipped` is saying "not applicable
+  #     here" (the feature it covers is not configured or not enforced). That
+  #     is NEUTRAL — it neither degrades nor fails the tier, whatever its
+  #     `critical:` flag, and it is not listed in an evaluation event's
+  #     `failed[]`. The row still renders with status "skipped", and
+  #     `check.completed` still fires, so it stays visible.
+  #   * A check the total budget never REACHED (`budget_exhausted: true` on
+  #     the row) was not performed at all, and an unperformed check is not a
+  #     healthy one. It floors the tier at :degraded — never :unavailable.
   #
   # The aggregator never raises. Each check is invoked through `safe_run`
   # which catches `StandardError` so a buggy custom check cannot take down
@@ -55,7 +67,7 @@ module StandardHealth
       duration_ms = ((monotonic - started) * 1000).round
       status = overall_status(check_rows)
 
-      failing = check_rows.reject { |r| r[:status] == :ok }
+      failing = failing_rows(check_rows)
 
       return { status: status, checks: check_rows, generated_at: now.iso8601 } unless tier == :ready
 
@@ -79,6 +91,21 @@ module StandardHealth
         checks: check_rows,
         generated_at: now.iso8601
       }
+    end
+
+    # The rows an evaluation event reports as failing: everything that is not
+    # :ok, except a check that reported :skipped itself (not applicable, so
+    # not a failure). A budget skip IS listed — it is the only place a skip
+    # shows up in the transition-gated event. @api private (also used by
+    # AggregateReport).
+    def self.failing_rows(rows)
+      rows.reject { |r| r[:status] == :ok || neutral_skip?(r) }
+    end
+
+    # A row the check itself reported as :skipped — "not applicable here".
+    # Neutral in the roll-up. A budget skip is not neutral. @api private
+    def self.neutral_skip?(row)
+      row[:status] == :skipped && !row[:budget_exhausted]
     end
 
     # Per-failure detail for an evaluation event. Public (but @api private) so
@@ -177,12 +204,15 @@ module StandardHealth
     private_class_method :budget_exhausted?
 
     # A check the total budget never reached. `:skipped`, never silently
-    # `:ok` — an unperformed check is not a healthy one.
+    # `:ok` — an unperformed check is not a healthy one. `budget_exhausted`
+    # is what separates it from a check that reported :skipped itself (which
+    # is neutral); see overall_status.
     def self.skipped_row(reg, budget)
       {
         name: reg.name,
         critical: reg.critical,
         status: :skipped,
+        budget_exhausted: true,
         error: "skipped — total check budget of #{budget}s exhausted"
       }
     end
@@ -191,10 +221,16 @@ module StandardHealth
     def self.overall_status(rows)
       return :ok if rows.empty?
 
-      failures = rows.reject { |r| r[:status] == :ok }
+      # A check that reported :skipped itself is not applicable here, so it is
+      # NEUTRAL: it must not degrade the tier (sidekick-web's non-critical
+      # attestation check held /health at "degraded" forever while attestation
+      # was simply not configured), and a critical one must not fail it
+      # either — "not applicable" says nothing about whether the app can
+      # serve. It stays in checks[] as "skipped" for visibility.
+      failures = failing_rows(rows)
       return :ok if failures.empty?
 
-      # A SKIP MUST NEVER PRODUCE :unavailable, even for a critical check.
+      # A BUDGET SKIP MUST NEVER PRODUCE :unavailable, even for a critical check.
       # Otherwise a slow *non-critical* check could exhaust the budget, leave
       # the database check unrun, and pull a perfectly healthy instance out of
       # rotation — a self-inflicted outage caused by the safety mechanism.

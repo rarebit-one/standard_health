@@ -18,8 +18,10 @@ module StandardHealth
   #
   # Status roll-up, in the estate's readiness vocabulary:
   #   :unavailable (503) — a critical check failed, or a :critical circuit is RED
-  #   :degraded    (200) — a non-critical check failed / was skipped, or the
-  #                        circuit roll-up is :degraded
+  #   :degraded    (200) — a non-critical check failed, a check was skipped
+  #                        by the total budget, or the circuit roll-up is
+  #                        :degraded. A check that reports :skipped itself
+  #                        (not applicable) is neutral — see Aggregator.
   #   :ok          (200) — otherwise
   #
   # StandardCircuit's own word for its worst state is `:critical`; it is
@@ -92,7 +94,7 @@ module StandardHealth
     # notifier logs this one (so redacted messages still reach logs); Sentry
     # and Metrics ignore it.
     def emit_evaluation(report, rows, circuits, started)
-      failing = rows.reject { |r| r[:status] == :ok }
+      failing = Aggregator.failing_rows(rows)
       payload = {
         status: report[:status],
         duration_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round,

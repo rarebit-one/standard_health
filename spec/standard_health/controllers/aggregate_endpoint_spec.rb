@@ -73,6 +73,23 @@ RSpec.describe "aggregate endpoint (config.aggregate_endpoint)", type: :request 
       expect(body["checks"].map { |r| r["name"] }).to eq(["database"])
     end
 
+    # The sidekick-web case: a non-critical aggregate check that reports
+    # :skipped (feature not configured) used to hold /health at "degraded".
+    it "serves 200 \"ok\" with a self-reported skipped check still listed as \"skipped\"" do
+      hide_const("StandardCircuit")
+      skipped = Class.new(StandardHealth::Check) { def run = { status: :skipped } }
+      enable! do |c|
+        c.register_check(:database, ok_check, critical: true)
+        c.register_aggregate_check(:attestation_roots, skipped)
+      end
+
+      get "/health"
+
+      expect(response).to have_http_status(:ok)
+      expect(body["status"]).to eq("ok")
+      expect(body["checks"].find { |r| r["name"] == "attestation_roots" }).to include("status" => "skipped")
+    end
+
     it "is also reachable with a trailing slash" do
       hide_const("StandardCircuit")
       enable!
