@@ -164,6 +164,48 @@ RSpec.describe StandardHealth::Aggregator, "instrumentation, timeouts and budget
     end
   end
 
+  describe "a check that reports :skipped itself" do
+    let(:skipped_check) do
+      Class.new(StandardHealth::Check) do
+        def run
+          { status: :skipped }
+        end
+      end
+    end
+
+    let(:fail_check) do
+      Class.new(StandardHealth::Check) do
+        def run
+          { status: :fail, error: "boom" }
+        end
+      end
+    end
+
+    it "still emits check.completed with status :skipped" do
+      events = captured_events
+      StandardHealth.config.register_check(:attestation, skipped_check)
+
+      described_class.call
+
+      payload = events.find { |n, _| n == "standard_health.check.completed" }.last
+      expect(payload).to include(name: :attestation, status: :skipped)
+    end
+
+    # Not applicable is not a failure: listing it would make the Logger and
+    # Sentry notifiers name it as "failing" whenever something else degrades.
+    it "is left out of ready.evaluated's failed[] and failures" do
+      events = captured_events
+      StandardHealth.config.register_check(:attestation, skipped_check)
+      StandardHealth.config.register_check(:cache, fail_check)
+
+      described_class.call
+
+      payload = events.find { |n, _| n == "standard_health.ready.evaluated" }.last
+      expect(payload).to include(status: :degraded, failed: [:cache])
+      expect(payload[:failures].map { |f| f[:name] }).to eq([:cache])
+    end
+  end
+
   describe "total budget" do
     it "is OFF by default" do
       StandardHealth.config.register_check(:slow, slow_check)
@@ -180,7 +222,30 @@ RSpec.describe StandardHealth::Aggregator, "instrumentation, timeouts and budget
       rows = described_class.call[:checks]
 
       expect(rows.last[:status]).to eq(:skipped)
+      expect(rows.last[:budget_exhausted]).to be(true)
       expect(rows.last[:error]).to match(/budget/)
+    end
+
+    # A check that REPORTS :skipped is neutral (0.7.1); a check the budget
+    # never reached was not performed, and must still floor at :degraded.
+    it "floors a budget-skipped NON-critical check at :degraded (unlike a self-reported skip)" do
+      StandardHealth.config.total_check_budget = 0.1
+      StandardHealth.config.register_check(:slow, slow_check)
+      StandardHealth.config.register_check(:after, ok_check)
+
+      expect(described_class.call[:status]).to eq(:degraded)
+    end
+
+    it "lists a budget skip in ready.evaluated's failed[]" do
+      events = captured_events
+      StandardHealth.config.total_check_budget = 0.1
+      StandardHealth.config.register_check(:slow, slow_check)
+      StandardHealth.config.register_check(:after, ok_check)
+
+      described_class.call
+
+      payload = events.find { |n, _| n == "standard_health.ready.evaluated" }.last
+      expect(payload[:failed]).to eq([:after])
     end
 
     # Pins the ACTUAL semantics: the budget gates before each check, so it

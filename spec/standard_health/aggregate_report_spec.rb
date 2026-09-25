@@ -22,6 +22,47 @@ RSpec.describe StandardHealth::AggregateReport do
     expect(described_class.call[:status]).to eq(:degraded)
   end
 
+  describe "a check that reports :skipped itself (0.7.1: neutral)" do
+    let(:skipped_check) do
+      Class.new(StandardHealth::Check) do
+        def run
+          { status: :skipped }
+        end
+      end
+    end
+
+    let(:fail_check) do
+      Class.new(StandardHealth::Check) do
+        def run
+          { status: :fail, error: "boom" }
+        end
+      end
+    end
+
+    before { hide_const("StandardCircuit") }
+
+    it "leaves the aggregate :ok and the row visible as :skipped" do
+      StandardHealth.config.register_aggregate_check(:attestation_roots, skipped_check)
+
+      report = described_class.call
+
+      expect(report[:status]).to eq(:ok)
+      expect(report[:checks]).to contain_exactly(include(name: :attestation_roots, status: :skipped))
+    end
+
+    it "is left out of aggregate.evaluated's failed[] while a real failure still degrades" do
+      events = []
+      allow(StandardHealth::EventEmitter).to receive(:emit) { |name, payload| events << [name, payload] }
+      StandardHealth.config.register_aggregate_check(:attestation_roots, skipped_check)
+      StandardHealth.config.register_aggregate_check(:cache, fail_check)
+
+      expect(described_class.call[:status]).to eq(:degraded)
+
+      payload = events.find { |n, _| n == described_class::EVENT }.last
+      expect(payload[:failed]).to eq([:cache])
+    end
+  end
+
   it "never raises when instrumentation blows up" do
     hide_const("StandardCircuit")
     allow(StandardHealth::EventEmitter).to receive(:emit).and_raise("bus down")

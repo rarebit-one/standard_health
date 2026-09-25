@@ -192,7 +192,9 @@ module StandardHealth
     attr_accessor :default_check_timeout
 
     # Budget across all checks, evaluated BEFORE each check starts. Checks not
-    # reached are reported :skipped, and a skip alone floors the roll-up at
+    # reached are reported :skipped with `budget_exhausted: true` (unlike a
+    # check that reports :skipped itself, which is neutral), and such a skip
+    # alone floors the roll-up at
     # :degraded — never :unavailable. Otherwise a slow NON-critical check could
     # exhaust the budget, leave a critical check unrun, and pull a healthy app
     # out of rotation. nil = no budget.

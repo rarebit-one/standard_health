@@ -106,7 +106,7 @@ end
 | Status | HTTP | When |
 |---|---|---|
 | `unavailable` | 503 | a critical check failed, or a `:critical` circuit is red |
-| `degraded` | 200 | a non-critical check failed or was skipped, or the circuit roll-up is `:degraded` |
+| `degraded` | 200 | a non-critical check failed, a check was skipped by the total budget, or the circuit roll-up is `:degraded` |
 | `ok` | 200 | otherwise |
 
 **The aggregate tier re-runs your readiness checks by default.** With
@@ -806,9 +806,25 @@ go in `extra:`.
 
 The orchestrator should pull the instance out of rotation only on 503; degraded means "still serving, page someone."
 
-`skipped` also exists, for a check the total budget never reached (see
-Timeouts). A skip floors the roll-up at `degraded` and **never** produces
-`unavailable`, even for a critical check.
+`skipped` also exists, in two flavours that roll up differently:
+
+- **A check that returns `status: :skipped` itself** — "not applicable here"
+  (the feature it covers isn't configured or enforced). This is **neutral**
+  (since 0.7.1): it neither degrades nor fails the roll-up, whether the check
+  is critical or not, and it is left out of the evaluation events' `failed[]`.
+  It still renders in `checks[]` with `"status": "skipped"` and still emits
+  `check.completed`, so it stays visible. A critical check is neutral too on
+  purpose: "not applicable" says nothing about whether the instance can serve,
+  so it must not pull it out of rotation — and it must not mark it healthy
+  *because of* that check either; it simply doesn't count. If the state should
+  page, return `:fail`.
+- **A check the total budget never reached** (see Timeouts) — rendered with
+  `"budget_exhausted": true`. That check was not performed, which is not the
+  same as healthy, so it floors the roll-up at `degraded` and **never**
+  produces `unavailable`, even for a critical check.
+
+A real failure still rolls up exactly as before alongside any skip: a failing
+critical check is `unavailable`, a failing non-critical one `degraded`.
 
 ## Failure detail is redacted
 
@@ -934,8 +950,8 @@ slow-but-fine starts reporting `:fail`, and for a critical check that pulls
 the instance out of rotation. Pick values from observed `latency_ms` rather
 than intuition; that is what the `check.completed` events are for.
 
-Checks the total budget never reaches report `:skipped`, never silently `:ok`.
-A skip alone floors the roll-up at `degraded` — otherwise a slow *non-critical*
+Checks the total budget never reaches report `:skipped` (with
+`budget_exhausted: true`), never silently `:ok`. A budget skip alone floors the roll-up at `degraded` — otherwise a slow *non-critical*
 check could exhaust the budget, leave the database check unrun, and pull a
 healthy instance out of rotation.
 

@@ -11,6 +11,16 @@ module StandardHealth
   #
   #   { status: :fail, error: "connection refused" }
   #
+  # or, when the check does not apply to this deployment (the feature it
+  # covers is not configured or not enforced):
+  #
+  #   { status: :skipped }
+  #
+  # A self-reported :skipped is NEUTRAL in the roll-up (0.7.1): it never
+  # degrades or fails the tier, even for a critical check, but it still
+  # renders in `checks[]` as "skipped". Return :fail, not :skipped, for
+  # anything that should page.
+  #
   # The `with_timing` helper wraps a block, captures latency, and converts
   # any unhandled `StandardError` into a `:fail` row so subclasses don't
   # have to repeat the pattern.
