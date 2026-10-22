@@ -115,6 +115,21 @@ module StandardHealth
       @mode_aliases[name.to_sym] = Array(modes).map(&:to_s)
     end
 
+    # Resolves every `in:` alias now. `Configuration#env_spec=` calls this,
+    # so an undeclared or misspelt alias fails at boot instead of raising on
+    # the first audit (a /diagnostics/env request, or an EnvSpecAudit row).
+    #
+    # @raise [UnknownModeAlias] naming every unknown alias
+    # @return [self]
+    def validate!
+      unknown = entries.filter_map { |entry| entry.modes if alias_unknown?(entry.modes) }.uniq
+      return self if unknown.empty?
+
+      raise UnknownModeAlias,
+        "Unknown mode alias#{"es" if unknown.size > 1}: #{unknown.map(&:inspect).join(", ")} " \
+        "(declare it with mode_alias)"
+    end
+
     # Group subsequent declarations under a label. Pure metadata —
     # propagated to audit rows as `group:` and otherwise inert. Nested
     # `group` blocks are supported; the innermost label is the one that
@@ -251,6 +266,10 @@ module StandardHealth
       modes = resolve_modes(entry.modes)
       return true if modes.nil? || modes.empty?
       modes.include?(mode_str)
+    end
+
+    def alias_unknown?(modes)
+      modes.is_a?(Symbol) && !@mode_aliases.key?(modes)
     end
 
     def resolve_modes(modes)

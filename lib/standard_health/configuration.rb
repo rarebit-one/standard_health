@@ -86,7 +86,16 @@ module StandardHealth
     # An optional `StandardHealth::EnvSpec` instance describing required and
     # recommended environment variables for the host app. Audited via the
     # /diagnostics/env endpoint.
-    attr_accessor :env_spec
+    attr_reader :env_spec
+
+    # Validates the spec as it is assigned (`EnvSpec#validate!`), so an
+    # `in:` alias with no `mode_alias` fails the initializer at boot rather
+    # than raising on the first audit, which is a /diagnostics/env request
+    # in production.
+    def env_spec=(spec)
+      spec.validate! if spec.respond_to?(:validate!)
+      @env_spec = spec
+    end
 
     # --- Instrumentation -----------------------------------------------
     #
@@ -270,13 +279,16 @@ module StandardHealth
     #   Validated against the constructor's signature HERE, so a typo fails
     #   at boot instead of turning into an ArgumentError on every probe (which
     #   the aggregator would dutifully report as a failing check forever).
+    #
+    # Re-registering a name replaces that registration in place (last writer
+    # wins), so `configure` can safely re-run, e.g. from `to_prepare` on
+    # reload, without running the check twice.
     def register_check(name, klass, critical: false, timeout: nil, **options)
       validate_check_options!(klass, options)
       registration = Registration.new(
         name: name.to_sym, klass: klass, critical: critical, timeout: timeout, options: options
       )
-      @checks << registration
-      registration
+      upsert_registration(@checks, registration)
     end
 
     # The check set every consumer app registers by hand. Each entry: default
@@ -362,13 +374,14 @@ module StandardHealth
     #
     #   c.register_aggregate_check :solid_cable, StandardHealth::Checks::SolidCable
     #   c.register_aggregate_check :attestation_roots, "AttestationRootsCheck"
+    #
+    # Re-registering a name replaces it in place, as for #register_check.
     def register_aggregate_check(name, klass, critical: false, timeout: nil, **options)
       validate_check_options!(klass, options)
       registration = Registration.new(
         name: name.to_sym, klass: klass, critical: critical, timeout: timeout, options: options
       )
-      @aggregate_checks << registration
-      registration
+      upsert_registration(@aggregate_checks, registration)
     end
 
     DiagnosticsAssertion = Struct.new(:name, :callable)
@@ -444,6 +457,12 @@ module StandardHealth
     # inspects the signature — never instantiates — so a check with side
     # effects in `initialize` is not run at boot. A constructor taking
     # `**kwargs` accepts anything and is not second-guessed.
+    def upsert_registration(registry, registration)
+      index = registry.index { |existing| existing.name == registration.name }
+      index ? registry[index] = registration : registry << registration
+      registration
+    end
+
     def validate_check_options!(klass, options)
       return if options.empty?
       return unless klass.is_a?(Module) # a String name resolves at run time
