@@ -362,7 +362,7 @@ end
 
 - `nil` (omitted) — entry always applies
 - `Array<String>` — literal mode list (existing behaviour)
-- `Symbol` — resolved against `mode_alias` at audit time. An undeclared Symbol raises `StandardHealth::EnvSpec::UnknownModeAlias`.
+- `Symbol` — resolved against `mode_alias`. Assigning the spec (`c.env_spec = …`) checks every alias, so an undeclared Symbol raises `StandardHealth::EnvSpec::UnknownModeAlias` at boot, naming each unknown alias, rather than on the first `/diagnostics/env` request.
 
 ### `description:` and `consumed_by:`
 
@@ -521,6 +521,10 @@ end
 ```
 
 `with_timing` captures `latency_ms` on success and converts any `StandardError` into `{ status: :fail, error: <message> }`.
+
+Registering a name that is already registered replaces that check in place (the
+same for `register_aggregate_check`), so a `configure` block that runs twice,
+e.g. from `to_prepare` on reload, doesn't run any check twice.
 
 **Per-registration options (0.6.0).** Keywords other than `critical:` and
 `timeout:` are forwarded to the check's constructor, and validated against its

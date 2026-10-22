@@ -146,6 +146,31 @@ RSpec.describe StandardHealth::EnvSpec do
         .to raise_error(StandardHealth::EnvSpec::UnknownModeAlias, /nonexistent/)
     end
 
+    describe "#validate!" do
+      it "names every undeclared alias at once" do
+        spec = described_class.define do
+          mode_alias :deployed, %w[staging production]
+          required :APP_HOST, in: :deployed
+          required :SENTRY_DSN, in: :live
+          recommended :METRICS_URL, in: :preview
+        end
+
+        expect { spec.validate! }
+          .to raise_error(StandardHealth::EnvSpec::UnknownModeAlias, /Unknown mode aliases: :live, :preview/)
+      end
+
+      it "returns the spec when every alias is declared (or none is used)" do
+        spec = described_class.define do
+          mode_alias :deployed, %w[staging production]
+          required :APP_HOST, in: :deployed
+          required :SECRET_KEY_BASE, in: %w[production]
+          required :DATABASE_URL
+        end
+
+        expect(spec.validate!).to be(spec)
+      end
+    end
+
     it "still accepts Array<String> for in:" do
       spec = described_class.define do
         required :APP_HOST, in: %w[production]

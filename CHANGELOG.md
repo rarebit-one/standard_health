@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Re-registering a check replaces it.** `register_check` and
+  `register_aggregate_check` replace an existing registration of the same name
+  in place (last writer wins) instead of appending a second one, matching
+  `register_diagnostics_assertion`. A `configure` block that runs twice, e.g.
+  from `to_prepare` on reload, no longer runs every check twice.
+- **`env_spec` aliases are checked at boot.** Assigning `c.env_spec = …` calls
+  the new `EnvSpec#validate!`, which raises `EnvSpec::UnknownModeAlias` naming
+  every `in:` alias that has no `mode_alias`. Before, an undeclared alias raised
+  only on the first audit, which was a production `/diagnostics/env` request
+  (it 500'd one app's doctor tier once). All five estate apps declare every
+  alias they use, so none of them is affected.
+
 ## [0.7.1] - 2026-09-25
 
 ### Fixed

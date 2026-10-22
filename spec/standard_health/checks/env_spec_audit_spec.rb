@@ -131,8 +131,14 @@ RSpec.describe StandardHealth::Checks::EnvSpecAudit do
   end
 
   describe "never-raise invariant" do
+    # `env_spec=` now rejects an undeclared alias at boot, so reach the bad
+    # state the way a spec still can: an alias dropped after assignment.
     it "degrades to :fail when the spec's audit raises (bad mode alias)" do
-      configure_spec { required :ANYTHING, in: :never_declared }
+      configure_spec do
+        mode_alias :dropped_later, %w[production]
+        required :ANYTHING, in: :dropped_later
+      end
+      StandardHealth.config.env_spec.mode_aliases.delete(:dropped_later)
 
       result = described_class.new(name: :env_spec).run
 
