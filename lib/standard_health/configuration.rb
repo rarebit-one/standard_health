@@ -453,16 +453,17 @@ module StandardHealth
 
     private
 
-    # Rejects option keys the check's constructor cannot accept. Only
-    # inspects the signature — never instantiates — so a check with side
-    # effects in `initialize` is not run at boot. A constructor taking
-    # `**kwargs` accepts anything and is not second-guessed.
+    # Replaces the registration with the same name in place, or appends.
     def upsert_registration(registry, registration)
       index = registry.index { |existing| existing.name == registration.name }
       index ? registry[index] = registration : registry << registration
       registration
     end
 
+    # Rejects option keys the check's constructor cannot accept. Only
+    # inspects the signature — never instantiates — so a check with side
+    # effects in `initialize` is not run at boot. A constructor taking
+    # `**kwargs` accepts anything and is not second-guessed.
     def validate_check_options!(klass, options)
       return if options.empty?
       return unless klass.is_a?(Module) # a String name resolves at run time
