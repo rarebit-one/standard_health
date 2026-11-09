@@ -8,7 +8,7 @@ gem "sqlite3"
 gem "puma"
 
 group :development, :test do
-  gem "rspec-rails", "~> 8.0"
+  gem "rspec-rails", "~> 8.1"
   gem "bundler-audit", require: false
   gem "simplecov", require: false
 end
