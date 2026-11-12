@@ -5,7 +5,7 @@ require_relative "lib/standard_health/version"
 Gem::Specification.new do |spec|
   spec.name        = "standard_health"
   spec.version     = StandardHealth::VERSION
-  spec.authors     = ["Jaryl Sim"]
+  spec.authors     = ["Rarebit One"]
   spec.email       = ["code@jaryl.dev"]
   spec.homepage    = "https://github.com/rarebit-one/standard_health"
   spec.summary     = "A drop-in health check and environment-spec engine for Rails 8 host apps."
