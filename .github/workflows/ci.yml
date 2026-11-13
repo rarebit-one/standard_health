@@ -12,8 +12,13 @@ permissions:
 
 jobs:
   ci:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v2
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v3
     with:
       ruby-versions: '["3.4.4","4.0.0","4.0.1","4.0.2","4.0.3","4.0.4"]'
+      # TEMPORARY until this gem moves to Ruby 4.0.9. Hosted ubuntu-latest is
+      # now ubuntu-26.04, where setup-ruby builds only the latest patch of each
+      # series (4.0.9): every Ruby above fails to install there. ubuntu-24.04
+      # still has them all.
+      runner-label: ubuntu-24.04
       extra-lint-commands: |
         bundle exec bundler-audit --update
