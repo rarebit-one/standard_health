@@ -258,18 +258,22 @@ RSpec.describe StandardHealth::EnvSpec do
       expect(by_name[:OUTSIDE]).not_to have_key(:group)
     end
 
-    it "uses the innermost label when group blocks are nested" do
+    it "combines the labels of nested group blocks, outermost first" do
       spec = described_class.define do
         group "Outer" do
+          required :OUTER_ONLY
           group "Inner" do
             required :NESTED
           end
+          required :OUTER_AGAIN
         end
       end
 
-      audit = spec.audit({}, mode: "production")
+      by_name = spec.audit({}, mode: "production").each_with_object({}) { |row, h| h[row[:name]] = row }
 
-      expect(audit.first).to include(name: :NESTED, group: "Inner")
+      expect(by_name[:NESTED]).to include(group: "Outer / Inner")
+      expect(by_name[:OUTER_ONLY]).to include(group: "Outer")
+      expect(by_name[:OUTER_AGAIN]).to include(group: "Outer")
     end
 
     it "raises ArgumentError when group is called without a block" do

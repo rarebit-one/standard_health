@@ -155,6 +155,36 @@ RSpec.describe StandardHealth::AggregateReport do
       expect(Rails.error).not_to have_received(:report)
     end
 
+    it "goes to config.error_reporter instead of Rails.error when one is set, with the same context" do
+      reported = []
+      StandardHealth.config.error_reporter = ->(error, context) { reported << [error, context] }
+      StandardHealth.config.register_aggregate_check(:flaky, raising_check)
+
+      described_class.call
+
+      expect(reported).to match([[an_instance_of(ArgumentError), { health_check: "flaky", tier: "aggregate" }]])
+      expect(Rails.error).not_to have_received(:report)
+    end
+
+    it "is not passed to config.error_reporter on the readiness tier either" do
+      reported = []
+      StandardHealth.config.error_reporter = ->(error, context) { reported << [error, context] }
+      StandardHealth.config.register_check(:database, raising_check, critical: true)
+
+      StandardHealth::Aggregator.call
+
+      expect(reported).to be_empty
+    end
+
+    it "still answers when config.error_reporter raises" do
+      StandardHealth.config.error_reporter = ->(_error, _context) { raise "reporter down" }
+      StandardHealth.config.register_aggregate_check(:flaky, raising_check)
+
+      result = nil
+      expect { result = described_class.call }.not_to raise_error
+      expect(result[:checks].first).to include(name: :flaky, status: :fail, error_class: "ArgumentError")
+    end
+
     it "still answers when the error reporter itself raises" do
       allow(Rails.error).to receive(:report).and_raise("reporter down")
       StandardHealth.config.register_aggregate_check(:flaky, raising_check)

@@ -54,6 +54,11 @@ module StandardHealth
     # `ActiveSupport.on_load(:standard_health)`. See `Contributions`.
     # Process-wide and deliberately not reset by `reset_config!`: the hooks
     # run once per process, so nothing would re-contribute.
+    #
+    # Contributing gems never see this registry, only its
+    # `Contributions::Facade`.
+    #
+    # @api private
     def contributions
       @contributions ||= Contributions.new
     end
@@ -103,7 +108,8 @@ module StandardHealth
   end
 end
 
-# Hands the registry to every `ActiveSupport.on_load(:standard_health)` hook:
-# those already registered by gems required earlier run now, and any
-# registered later run immediately.
-ActiveSupport.run_load_hooks(:standard_health, StandardHealth.contributions)
+# Hands the registry's contributor facade (`contribute_check` and
+# `contribute_env_vars`, nothing else) to every
+# `ActiveSupport.on_load(:standard_health)` hook: those already registered by
+# gems required earlier run now, and any registered later run immediately.
+ActiveSupport.run_load_hooks(:standard_health, StandardHealth.contributions.facade)

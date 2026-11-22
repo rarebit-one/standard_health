@@ -71,12 +71,16 @@ RSpec.describe StandardHealth::Contributions do
       ])
     end
 
-    it "keeps a nested group label (innermost wins, as in EnvSpec)" do
+    it "prefixes a nested group label with the contributor" do
       registry.contribute_env_vars(:standard_singpass) do
+        required :SINGPASS_CLIENT_ID
         group("MyInfo") { required :MYINFO_CLIENT_ID }
       end
 
-      expect(registry.env_spec.entries.first.group).to eq("MyInfo")
+      expect(registry.env_spec.entries.map { |e| [e.name, e.group] }).to eq([
+        [:SINGPASS_CLIENT_ID, "standard_singpass"],
+        [:MYINFO_CLIENT_ID, "standard_singpass / MyInfo"]
+      ])
     end
 
     it "rejects a mode alias in `in:`, because aliases belong to the app" do
@@ -113,15 +117,78 @@ RSpec.describe StandardHealth::Contributions do
 
     it "lists each var once, the first contributor winning" do
       registry.contribute_env_vars("standard_id") { required :SHARED, description: "first" }
-      registry.contribute_env_vars("standard_singpass") do
-        recommended :SHARED, description: "second"
-        required :MYINFO_CLIENT_ID
-      end
+      expect do
+        registry.contribute_env_vars("standard_singpass") do
+          recommended :SHARED, description: "second"
+          required :MYINFO_CLIENT_ID
+        end
+      end.to output.to_stderr
 
       expect(registry.env_spec.entries.map { |e| [e.name, e.group, e.description] }).to eq([
         [:SHARED, "standard_id", "first"],
         [:MYINFO_CLIENT_ID, "standard_singpass", nil]
       ])
+    end
+  end
+
+  describe "the same env var from two contributors" do
+    before { registry.contribute_env_vars("standard_id") { required :SHARED } }
+
+    it "warns, naming the var and both contributors" do
+      expect { registry.contribute_env_vars("standard_singpass") { recommended :SHARED } }
+        .to output(/env var SHARED is contributed by both "standard_id" and "standard_singpass"; "standard_id" contributed first/)
+        .to_stderr
+    end
+
+    it "names the earlier contributor as the winner when it re-contributes the var" do
+      fresh = described_class.new
+      fresh.contribute_env_vars("standard_id") { required :OTHER }
+      fresh.contribute_env_vars("standard_singpass") { recommended :SHARED }
+
+      expect { fresh.contribute_env_vars("standard_id") { required :SHARED } }
+        .to output(/both "standard_id" and "standard_singpass"; "standard_id" contributed first/).to_stderr
+      expect(fresh.env_spec.entries.find { |e| e.name == :SHARED }.group).to eq("standard_id")
+    end
+
+    it "warns once per process, not again on a re-contribution or an audit" do
+      expect { registry.contribute_env_vars("standard_singpass") { recommended :SHARED } }.to output.to_stderr
+
+      expect do
+        registry.contribute_env_vars("standard_singpass") { recommended :SHARED }
+        registry.env_spec.audit({}, mode: "production")
+      end.not_to output.to_stderr
+    end
+
+    it "does not warn when the vars differ" do
+      expect { registry.contribute_env_vars("standard_singpass") { required :MYINFO_CLIENT_ID } }
+        .not_to output.to_stderr
+    end
+  end
+
+  describe "#facade" do
+    subject(:facade) { registry.facade }
+
+    it "exposes only the two contributor methods" do
+      expect(facade.public_methods(false)).to contain_exactly(:contribute_check, :contribute_env_vars)
+      expect(facade).not_to respond_to(:checks)
+      expect(facade).not_to respond_to(:env_spec)
+      expect(facade).not_to respond_to(:defaults_applied!)
+    end
+
+    it "contributes to the registry" do
+      facade.contribute_check :standard_id_migrations, "StandardId::Checks::Migrations", critical: true
+      facade.contribute_env_vars("standard_id") { recommended :STANDARD_ID_OAUTH_SIGNING_KEY }
+
+      expect(registry.checks.map { |c| [c.name, c.critical] }).to eq([[:standard_id_migrations, true]])
+      expect(registry.env_spec.entries.map(&:name)).to eq([:STANDARD_ID_OAUTH_SIGNING_KEY])
+    end
+
+    it "keeps the readers out of reach of an instance_eval'd (arity-0) hook block" do
+      expect { facade.instance_eval { checks } }.to raise_error(NameError, /checks/)
+    end
+
+    it "is what the load hook yields" do
+      expect(StandardHealth.contributions.facade).to be_a(described_class::Facade)
     end
   end
 

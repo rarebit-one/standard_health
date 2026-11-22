@@ -18,7 +18,9 @@ RSpec.describe "ActiveSupport.on_load(:standard_health)" do
       require "active_support"
 
       # A gem required BEFORE standard_health (block takes the registry).
+      yielded = nil
       ActiveSupport.on_load(:standard_health) do |health|
+        yielded = [health.class.name, health.respond_to?(:checks)]
         health.contribute_check :early_check, "EarlyCheck", critical: true
         health.contribute_env_vars("early_gem") { recommended :EARLY_VAR }
       end
@@ -37,7 +39,7 @@ RSpec.describe "ActiveSupport.on_load(:standard_health)" do
       checks = StandardHealth.config.checks.to_h { |r| [r.name, [r.klass, r.critical?]] }
       env = StandardHealth.config.effective_env_spec.entries.map { |e| [e.name, e.group] }
 
-      puts JSON.generate(names: names, checks: checks, env: env)
+      puts JSON.generate(names: names, checks: checks, env: env, yielded: yielded)
     RUBY
   end
 
@@ -54,5 +56,7 @@ RSpec.describe "ActiveSupport.on_load(:standard_health)" do
     expect(result["names"]).to eq(%w[early_check late_check])
     expect(result["checks"]).to eq("early_check" => ["EarlyCheck", true], "late_check" => ["LateCheck", false])
     expect(result["env"]).to eq([%w[EARLY_VAR early_gem], %w[LATE_VAR late_gem]])
+    # The hook sees the narrow facade, not the registry and its readers.
+    expect(result["yielded"]).to eq(["StandardHealth::Contributions::Facade", false])
   end
 end

@@ -180,13 +180,13 @@ module StandardHealth
     # every raise from a ~6/min/instance probe would be exactly the noise that
     # notifier exists to prevent. Severity mirrors that notifier: a critical
     # check is an :error (it makes the tier :unavailable), otherwise :warning.
+    #
+    # `Configuration#error_reporter`, when set, receives it instead.
     def self.report_raised_check(error, reg, tier)
       return if tier == :ready
-      return unless defined?(::Rails) && ::Rails.respond_to?(:error) && ::Rails.error
 
-      ::Rails.error.report(
+      StandardHealth.config.report_error(
         error,
-        handled: true,
         severity: reg.critical ? :error : :warning,
         context: { health_check: reg.name.to_s, tier: tier.to_s }
       )

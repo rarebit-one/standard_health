@@ -42,7 +42,7 @@ module StandardHealth
   #     time. When `unless:` returns truthy or `if:` returns falsy the entry
   #     is reported with `status: :not_applicable`.
   #   - `group` (String, optional) — set implicitly by enclosing `group`
-  #     block; surfaced verbatim.
+  #     block(s), nested labels joined with " / "; surfaced verbatim.
   #   - `deprecated:` (Boolean, optional) — flag for staged removal. When
   #     true, the audit row includes `deprecated: true`.
   #   - `sunset_on:` (String/Date, optional) — target removal date.
@@ -70,6 +70,9 @@ module StandardHealth
     # `Checks::EnvSpecAudit`, so the doctor endpoint and the health check
     # cannot drift apart on what counts as a violation.
     VIOLATION_STATUSES = %i[missing forbidden mismatch].freeze
+
+    # Joins the labels of nested `group` blocks.
+    GROUP_SEPARATOR = " / "
 
     # Internal entry record. `modes` may be an Array<String> or a Symbol
     # alias that gets resolved at audit time.
@@ -152,8 +155,9 @@ module StandardHealth
 
     # Group subsequent declarations under a label. Pure metadata —
     # propagated to audit rows as `group:` and otherwise inert. Nested
-    # `group` blocks are supported; the innermost label is the one that
-    # propagates to enclosed entries.
+    # `group` blocks combine their labels outermost first, so
+    # `group("standard_singpass") { group("MyInfo") { ... } }` tags the
+    # enclosed entries "standard_singpass / MyInfo".
     #
     # @param label [String]
     def group(label, &block)
@@ -268,7 +272,7 @@ module StandardHealth
         consumed_by: normalize_consumed_by(opts[:consumed_by]),
         if_predicate: opts[:if],
         unless_predicate: opts[:unless],
-        group: @group_stack.last,
+        group: (@group_stack.join(GROUP_SEPARATOR) unless @group_stack.empty?),
         deprecated: opts[:deprecated] ? true : nil,
         sunset_on: opts[:sunset_on],
         replacement: opts[:replacement],

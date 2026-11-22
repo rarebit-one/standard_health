@@ -51,6 +51,29 @@ RSpec.describe "/diagnostics/env assertions", type: :request do
     )
   end
 
+  it "reports a raising assertion to config.error_reporter instead of Rails.error when one is set" do
+    allow(Rails.error).to receive(:report)
+    reported = []
+    StandardHealth.configure do |c|
+      c.error_reporter = ->(error, context) { reported << [error, context] }
+      c.register_diagnostics_assertion(:db) { raise ArgumentError, "connection refused" }
+    end
+
+    expect(body["assertions"].first).to include("name" => "db", "status" => "error")
+    expect(reported).to match([[an_instance_of(ArgumentError), { diagnostics_assertion: :db }]])
+    expect(Rails.error).not_to have_received(:report)
+  end
+
+  it "still renders the row when config.error_reporter raises" do
+    StandardHealth.configure do |c|
+      c.error_reporter = ->(_error, _context) { raise "reporter down" }
+      c.register_diagnostics_assertion(:db) { raise ArgumentError, "connection refused" }
+    end
+
+    expect(body["assertions"].first).to include("name" => "db", "status" => "error", "error" => "connection refused")
+    expect(response).to have_http_status(:ok)
+  end
+
   it "turns a non-Hash result or an unknown status into an :error row" do
     StandardHealth.configure do |c|
       c.register_diagnostics_assertion(:nil_result) { nil }

@@ -400,7 +400,7 @@ required :APP_HOST,
 
 ### Groups
 
-Wrap related declarations in a `group "Label" do ... end` block to tag them with a category. Groups are pure metadata — they don't affect applicability, status, or evaluation order. Nested `group` blocks are supported; the innermost label propagates to enclosed entries. Calling `group` without a block raises `ArgumentError`.
+Wrap related declarations in a `group "Label" do ... end` block to tag them with a category. Groups are pure metadata — they don't affect applicability, status, or evaluation order. Nested `group` blocks combine their labels outermost first, joined with `" / "` (`group "Auth" do group "Google" do ... end end` tags entries `"Auth / Google"`). Calling `group` without a block raises `ArgumentError`.
 
 ```ruby
 StandardHealth::EnvSpec.define do
@@ -475,9 +475,11 @@ end
   `:ok`, `:warn` or `:error`. Other keys are rendered as-is. The gem sets
   `name:`, and the callable can't override it.
 - An assertion that raises becomes `{ status: "error", error_class:, error: }`
-  and is reported to `Rails.error` as handled. The tier is authenticated, so
-  the message is shown. A non-Hash result or an unknown status also becomes an
-  `:error` row. One broken assertion never takes the endpoint down.
+  and is reported to `Rails.error` as handled (or to
+  [`error_reporter`](#routing-the-gems-own-errors-error_reporter)). The tier
+  is authenticated, so the message is shown. A non-Hash result or an unknown
+  status also becomes an `:error` row. One broken assertion never takes the
+  endpoint down.
 - An `:error` row makes the top-level `status` `incomplete`. `:warn` does not.
   The endpoint still returns 200.
 - Assertions run per request, and only on this tier, never on `/alive`,
@@ -585,14 +587,30 @@ end
 
 If standard_health is not in the bundle the block never runs. If it is, the
 block runs exactly once whichever gem is required first: standard_health runs
-`ActiveSupport.run_load_hooks(:standard_health, StandardHealth.contributions)`
-when it loads, which fires hooks registered earlier, and later hooks fire
-immediately. The block receives the `StandardHealth::Contributions` registry
-(an arity-0 block is `instance_eval`'d on it, as with any load hook).
+`ActiveSupport.run_load_hooks(:standard_health, ...)` when it loads, which
+fires hooks registered earlier, and later hooks fire immediately.
 
-The registry is process-wide and separate from the configuration:
-`StandardHealth.reset_config!` does not clear it, so app and gem specs that
-reset config between examples keep every contribution.
+The block receives an object with exactly two methods, `contribute_check`
+and `contribute_env_vars`, and nothing else. An arity-0 block is
+`instance_eval`'d on that same object, as with any load hook, so this works
+too:
+
+```ruby
+ActiveSupport.on_load(:standard_health) do
+  contribute_check :audit_schema, "StandardAudit::Checks::Schema"
+  contribute_env_vars("standard_audit") { recommended :STANDARD_AUDIT_RETENTION_DAYS }
+end
+```
+
+**Contribute at require time.** Put the hook at the top level of the gem's
+main file or engine file, never in an initializer, `to_prepare` or
+`after_initialize`. Under `Bundler.require` that runs before any app
+initializer, which is where apps call `register_default_checks`. A check
+contributed later is not registered (see below); env vars still appear.
+
+What gems contribute lives in a process-wide registry, separate from the
+configuration: `StandardHealth.reset_config!` does not clear it, so app and
+gem specs that reset config between examples keep every contribution.
 
 ### `contribute_check(name, klass, critical: false, timeout: nil, **options)`
 
@@ -613,17 +631,22 @@ c.register_default_checks standard_id_migrations: { critical: true, timeout: 2 }
 - `:database`, `:solid_queue` and `:solid_cache` are reserved and raise
   `ArgumentError`. Re-contributing a name replaces it.
 - An app that registered the name itself keeps its own registration.
-- **Contribute when the gem is required** (top level of its main or engine
-  file). Under `Bundler.require` that is before any app initializer runs. A
-  check contributed after the app has called `register_default_checks` is not
-  registered retroactively; the gem prints a warning instead.
+- **A late check is not registered.** A check contributed after the app has
+  called `register_default_checks` is not added retroactively; standard_health
+  prints a warning to stderr instead. Contribute at require time.
+- **Aggregate-tier checks are not supported yet.** A contributed check joins
+  readiness (`register_default_checks`) only. An app that wants a gem's check
+  on the aggregate tier registers it there itself with
+  `register_aggregate_check`.
 
 ### `contribute_env_vars(contributor, &block)`
 
 The block is the [EnvSpec](#envspec) DSL (`required`, `recommended`,
-`forbidden`, `group`). Each entry is grouped under `contributor` (a nested
-`group` label wins, as in any spec), and the declarations join the app's
-`env_spec` on `/diagnostics/env` and in `Checks::EnvSpecAudit`:
+`forbidden`, `group`). Each entry is grouped under `contributor`, and a nested
+`group` is labelled beneath it (`group "MyInfo"` inside
+`contribute_env_vars "standard_singpass"` shows as
+`"standard_singpass / MyInfo"`). The declarations join the app's `env_spec`
+on `/diagnostics/env` and in `Checks::EnvSpecAudit`:
 
 - **The app wins.** If the app's `env_spec` declares a var at all, the gem's
   entries for it are dropped, so an app can tighten or relax a gem's
@@ -633,7 +656,8 @@ The block is the [EnvSpec](#envspec) DSL (`required`, `recommended`,
 - **Plain environment names only.** `in: %w[production]` works; `in: :live`
   and `mode_alias` raise `ArgumentError` when the gem loads, because aliases
   such as `:deployed` or `:live` are defined by each app, not by gems.
-- If two gems declare the same var, the first to contribute wins.
+- **If two gems declare the same var, the first to contribute wins.**
+  standard_health warns once per process, naming the var and both gems.
 - Re-contributing under the same `contributor` replaces its declarations.
   Contributions are merged when the audit runs, so a late one still appears.
 
@@ -973,6 +997,19 @@ probe period means ~6 evaluations/minute/instance:
 
 The Logger also reports `aggregate.evaluated` (silent on ok); Sentry and
 Metrics ignore it.
+
+### Routing the gem's own errors: `error_reporter`
+
+Two failures are reported as handled errors rather than events: a check that
+raises on the aggregate tier, and a diagnostics assertion that raises. They go
+to `Rails.error.report` by default. Set `error_reporter` to a callable taking
+`(error, context)` to send them elsewhere; `context` is the Hash `Rails.error`
+would get (`{ health_check:, tier: }` or `{ diagnostics_assertion: }`). A
+reporter that raises is swallowed, so it can never break a health tier.
+
+```ruby
+c.error_reporter = ->(error, context) { Sentry.capture_exception(error, extra: context) }
+```
 
 ### Narrowing metrics (0.6.0)
 

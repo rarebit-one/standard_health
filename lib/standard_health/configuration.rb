@@ -189,6 +189,37 @@ module StandardHealth
     # Extra `call(event_name, payload)` subscribers supplied by the host.
     attr_reader :extra_notifiers
 
+    # Where the gem reports its own handled errors: a check that raises on
+    # the aggregate tier, and a diagnostics assertion that raises. nil (the
+    # default) keeps `Rails.error.report(error, handled: true, ...)`. Set a
+    # callable taking `(error, context)` to route them elsewhere; `context`
+    # is the Hash `Rails.error` would get (`{ health_check:, tier: }` or
+    # `{ diagnostics_assertion: }`).
+    #
+    #   c.error_reporter = ->(error, context) { Sentry.capture_exception(error, extra: context) }
+    attr_reader :error_reporter
+
+    def error_reporter=(reporter)
+      unless reporter.nil? || reporter.respond_to?(:call)
+        raise ArgumentError, "error_reporter must respond to `call(error, context)`; got #{reporter.class}"
+      end
+
+      @error_reporter = reporter
+    end
+
+    # Reports a handled error through `error_reporter`, or `Rails.error` when
+    # none is set (`rails_options` such as `severity:` go to `Rails.error`
+    # only). Callers rescue: a broken reporter must not break a health tier.
+    #
+    # @api private
+    def report_error(error, context:, **rails_options)
+      if error_reporter
+        error_reporter.call(error, context)
+      elsif defined?(::Rails) && ::Rails.respond_to?(:error) && ::Rails.error
+        ::Rails.error.report(error, handled: true, context: context, **rails_options)
+      end
+    end
+
     # --- Response redaction --------------------------------------------
     #
     # When false (the default) a failing check reports `error_class` +
@@ -267,6 +298,7 @@ module StandardHealth
       @metrics_enabled = true
       @metric_events = nil
       @extra_notifiers = []
+      @error_reporter = nil
 
       @expose_check_errors = false
       @detail_token = nil
@@ -448,8 +480,8 @@ module StandardHealth
     # (`:ok`, `:warn` or `:error`) plus any detail keys. `name:` is set by
     # the gem. It runs per request, on the authenticated tier only, never on
     # /alive, /ready or the aggregate. A raise, a non-Hash, or an unknown
-    # status becomes an `:error` row (a raise is also reported to
-    # `Rails.error` as handled). An `:error` row makes the endpoint's
+    # status becomes an `:error` row (a raise is also reported, to
+    # `error_reporter` or else `Rails.error` as handled). An `:error` row makes the endpoint's
     # `status` `incomplete`; `:warn` does not.
     #
     # Re-registering a name replaces it, so `configure` can safely re-run
