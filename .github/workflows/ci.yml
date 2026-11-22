@@ -14,10 +14,10 @@ jobs:
   ci:
     uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v3
     with:
-      ruby-versions: '["3.4.4","4.0.0","4.0.1","4.0.2","4.0.3","4.0.4","4.0.9"]'
+      ruby-versions: '["3.4.4","4.0.0","4.0.1","4.0.2","4.0.3","4.0.4","4.0.10"]'
       # ubuntu-24.04 because the matrix tests patch releases older than the
       # newest 4.0.x, and ubuntu-26.04 (now ubuntu-latest) builds only the
-      # newest patch of each series. Drop it if the matrix narrows to 4.0.9.
+      # newest patch of each series. Drop it if the matrix narrows to 4.0.10.
       runner-label: ubuntu-24.04
       extra-lint-commands: |
         bundle exec bundler-audit --update
