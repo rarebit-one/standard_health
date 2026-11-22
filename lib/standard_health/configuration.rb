@@ -97,6 +97,27 @@ module StandardHealth
       @env_spec = spec
     end
 
+    # The spec that is actually audited, on `/diagnostics/env` and by
+    # `Checks::EnvSpecAudit`: `env_spec` plus the env vars other gems
+    # contributed (`Contributions#contribute_env_vars`), grouped per gem.
+    # The app's own declaration of a var wins over a gem's.
+    #
+    # With no `env_spec` set, the contributions alone form the spec; with
+    # neither, this is nil (the audit is empty, as before). `env_spec` itself
+    # stays exactly what the app assigned.
+    #
+    # Rebuilt on each call rather than cached, so a contribution that arrives
+    # after the initializer still shows up. Both are a handful of entries.
+    #
+    # @return [EnvSpec, nil]
+    def effective_env_spec
+      contributed = @contributions.env_spec
+      return @env_spec unless contributed
+      return contributed unless @env_spec
+
+      @env_spec.reverse_merge(contributed)
+    end
+
     # --- Instrumentation -----------------------------------------------
     #
     # Master switch for the Logger / Sentry / Metrics subscribers. On by
@@ -224,7 +245,10 @@ module StandardHealth
     # one — or better, a driver-level timeout.
     attr_accessor :total_check_budget
 
-    def initialize
+    # `contributions` is the process-wide registry by default; a fresh one
+    # isolates a test from whatever the loaded gems contributed.
+    def initialize(contributions: StandardHealth.contributions)
+      @contributions = contributions
       @parent_controller = "ActionController::API"
       @diagnostics_parent_controller = nil
       @diagnostics_basic_auth = nil
@@ -295,6 +319,9 @@ module StandardHealth
     # registration name, criticality, the check class (a String, resolved only
     # if the backing library is loaded), and the guard that decides whether
     # the backing library is present.
+    #
+    # Checks other gems contribute (`Contributions#contribute_check`) join this
+    # set at `register_default_checks` time.
     DEFAULT_CHECKS = {
       database: {
         name: :database, critical: true,
@@ -311,6 +338,10 @@ module StandardHealth
         klass: "StandardHealth::Checks::SolidCache",
         available: -> { defined?(::SolidCache) }
       },
+      # DEPRECATED: the one entry naming another gem's class. It stays until
+      # standard_audit contributes `audit_retention` itself; once it does, its
+      # contribution replaces this entry (same key, same position, never
+      # registered twice) and this entry will be removed.
       audit_retention: {
         name: :audit_retention, critical: false,
         klass: "StandardAudit::Checks::Retention",
@@ -325,6 +356,10 @@ module StandardHealth
     #   :solid_cache      StandardHealth::Checks::SolidCache    non-critical
     #   :audit_retention  StandardAudit::Checks::Retention      non-critical
     #
+    # followed by every check another gem contributed
+    # (`Contributions#contribute_check`), keyed by its contributed name and
+    # non-critical unless the contributor said otherwise.
+    #
     # Note the database check registers as `:database`, not the class's own
     # `:active_record` default — every consumer renamed it, and dashboards key
     # on the name.
@@ -334,35 +369,47 @@ module StandardHealth
     # failing. A name that is already registered is also skipped, so calling
     # this after (or before) hand-registering one of them never duplicates it.
     #
-    # Each keyword takes:
-    #   true   — register with the defaults above (the default)
+    # Each keyword (a built-in key or a contributed check's name) takes:
+    #   true   — register with the defaults (the default)
     #   false  — don't register it
     #   Hash   — register with overrides: `name:`, `critical:`, `timeout:`,
     #            plus any constructor options (see #register_check)
     #
     #   c.register_default_checks solid_cache: false,
-    #                             audit_retention: { critical: false, timeout: 1 }
+    #                             audit_retention: { critical: false, timeout: 1 },
+    #                             standard_id_migrations: { critical: true }
+    #
+    # An unknown keyword raises ArgumentError listing the known ones.
     #
     # @return [Array<Symbol>] names actually registered by this call
-    def register_default_checks(database: true, solid_queue: true, solid_cache: true, audit_retention: true)
-      requested = { database: database, solid_queue: solid_queue,
-                    solid_cache: solid_cache, audit_retention: audit_retention }
+    def register_default_checks(**settings)
+      table = default_check_table
+      settings = settings.transform_keys(&:to_sym)
+      unknown = settings.keys - table.keys
+      unless unknown.empty?
+        raise ArgumentError,
+              "unknown default check#{"s" if unknown.size > 1} #{unknown.map(&:inspect).join(", ")}; " \
+              "known: #{table.keys.join(", ")}. A check from another gem is known only once that gem " \
+              "has contributed it (when it is required)."
+      end
 
-      requested.filter_map do |key, setting|
+      @contributions.defaults_applied!
+
+      table.filter_map do |key, default|
+        setting = settings.fetch(key, true)
         next unless setting
-
-        overrides = setting.is_a?(Hash) ? setting.transform_keys(&:to_sym) : {}
-        default = DEFAULT_CHECKS.fetch(key)
         next unless default[:available].call
 
+        overrides = setting.is_a?(Hash) ? setting.transform_keys(&:to_sym) : {}
         name = (overrides.delete(:name) || default[:name]).to_sym
         next if @checks.any? { |reg| reg.name == name }
 
         critical = overrides.key?(:critical) ? overrides.delete(:critical) : default[:critical]
-        timeout = overrides.delete(:timeout)
-        klass = overrides.delete(:klass) || Object.const_get(default[:klass])
+        timeout = overrides.key?(:timeout) ? overrides.delete(:timeout) : default[:timeout]
+        klass = overrides.delete(:klass) || default_check_class(default)
+        options = default.fetch(:options, {}).merge(overrides)
 
-        register_check(name, klass, critical: critical, timeout: timeout, **overrides)
+        register_check(name, klass, critical: critical, timeout: timeout, **options)
         name
       end
     end
@@ -452,6 +499,30 @@ module StandardHealth
     end
 
     private
+
+    # DEFAULT_CHECKS plus contributed checks, keyed for register_default_checks.
+    # A contribution under a built-in key (only `audit_retention` is allowed,
+    # see Contributions::RESERVED_CHECK_NAMES) replaces that entry in place, so
+    # the check keeps its position and is never registered twice.
+    def default_check_table
+      @contributions.checks.each_with_object(DEFAULT_CHECKS.dup) do |check, table|
+        table[check.name] = {
+          name: check.name, critical: check.critical, timeout: check.timeout,
+          options: check.options, klass: check.klass, contributed: true,
+          available: -> { true }
+        }
+      end
+    end
+
+    # Built-in defaults resolve their class now, so its constructor options
+    # are validated at boot. A contributed class name stays a String and
+    # resolves when the check runs (see Registration#check_class): the
+    # contributing gem's constant may not be loadable yet.
+    def default_check_class(default)
+      return default[:klass] if default[:contributed]
+
+      Object.const_get(default[:klass])
+    end
 
     # Replaces the registration with the same name in place, or appends.
     def upsert_registration(registry, registration)

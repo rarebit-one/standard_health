@@ -586,4 +586,43 @@ RSpec.describe StandardHealth::EnvSpec do
       expect(spec.audit({ "PLAIN" => "x" }, mode: "x").first).not_to have_key(:expected_value)
     end
   end
+
+  describe "#reverse_merge" do
+    let(:app) do
+      described_class.define do
+        mode_alias :live, %w[production]
+        required :SHARED, in: :live
+        required :APP_ONLY
+      end
+    end
+
+    let(:gem_spec) do
+      described_class.define do
+        mode_alias :live, %w[staging]
+        mode_alias :gemish, %w[preview]
+        recommended :SHARED
+        recommended :SHARED, in: %w[staging]
+        forbidden :GEM_ONLY, in: %w[production]
+      end
+    end
+
+    it "keeps every receiver entry, then the other's entries for names the receiver does not declare" do
+      merged = app.reverse_merge(gem_spec)
+
+      expect(merged.entries.map { |e| [e.name, e.level] }).to eq([
+        [:SHARED, :required], [:APP_ONLY, :required], [:GEM_ONLY, :forbidden]
+      ])
+    end
+
+    it "combines mode aliases with the receiver's winning" do
+      expect(app.reverse_merge(gem_spec).mode_aliases).to eq(live: %w[production], gemish: %w[preview])
+    end
+
+    it "modifies neither spec" do
+      app.reverse_merge(gem_spec)
+
+      expect(app.entries.size).to eq(2)
+      expect(gem_spec.entries.size).to eq(3)
+    end
+  end
 end

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Other gems can contribute checks and env vars.** A gem registers
+  `ActiveSupport.on_load(:standard_health) { |health| ... }` with no
+  dependency on standard_health, and the block receives the new
+  `StandardHealth::Contributions` registry (`StandardHealth.contributions`).
+  standard_health runs the hook once when it loads, so it works in either
+  require order. See "Contributing checks from another gem" in the README.
+  - `contribute_check(name, klass, critical: false, timeout: nil, **options)`
+    adds a check to the set `register_default_checks` registers. It is
+    non-critical unless the contributor says otherwise, and apps opt out or
+    override it by name (`register_default_checks(standard_id_migrations:
+    false)`).
+  - `contribute_env_vars(contributor) { ... }` declares env vars with the
+    `EnvSpec` DSL, grouped under the contributor. They join the app's spec on
+    `/diagnostics/env` and in `Checks::EnvSpecAudit`, and the app's own
+    declaration of a var wins. They may use plain environment names only, not
+    app mode aliases. With no app `env_spec`, the contributions alone form the
+    spec.
+  - The registry lives outside `Configuration`, so `reset_config!` keeps
+    contributions.
+- `Configuration#effective_env_spec`: the app's `env_spec` merged with
+  contributed env vars. `env_spec` still returns exactly what the app set.
+- `EnvSpec#reverse_merge(other)`: a new spec with the other spec's entries
+  for vars the receiver does not declare.
+
+### Changed
+
+- `register_default_checks` takes any known key (built-ins plus contributed
+  check names) instead of four fixed keywords. Existing calls behave the
+  same. An unknown key still raises `ArgumentError`, now listing the known
+  keys.
+
+### Deprecated
+
+- The hardcoded `audit_retention` entry in `Configuration::DEFAULT_CHECKS`
+  (the only default naming another gem's class). It keeps working. Once
+  standard_audit contributes `audit_retention`, the contribution replaces it
+  (same key and position, registered once), and a later release removes the
+  hardcoded entry.
+
 ## [0.8.0] - 2026-10-22
 
 ### Changed

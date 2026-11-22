@@ -130,6 +130,26 @@ module StandardHealth
         "(declare it with mode_alias)"
     end
 
+    # A new spec holding this spec's entries followed by `other`'s entries
+    # for every var this spec does not declare. This spec wins: if it
+    # declares a name at all, none of `other`'s entries for that name are
+    # kept. Mode aliases are combined the same way (this spec's win).
+    #
+    # This is how gem-contributed declarations join the app's spec (see
+    # `StandardHealth::Contributions#contribute_env_vars`). Neither receiver
+    # nor argument is modified.
+    #
+    # @param other [EnvSpec]
+    # @return [EnvSpec]
+    def reverse_merge(other)
+      declared = entries.map(&:name)
+
+      self.class.new.tap do |merged|
+        other.mode_aliases.merge(mode_aliases).each { |name, modes| merged.mode_alias(name, modes) }
+        merged.append_entries(entries + other.entries.reject { |entry| declared.include?(entry.name) })
+      end
+    end
+
     # Group subsequent declarations under a label. Pure metadata —
     # propagated to audit rows as `group:` and otherwise inert. Nested
     # `group` blocks are supported; the innermost label is the one that
@@ -228,6 +248,12 @@ module StandardHealth
 
         out << row
       end
+    end
+
+    protected
+
+    def append_entries(new_entries)
+      @entries.concat(new_entries)
     end
 
     private

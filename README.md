@@ -210,6 +210,15 @@ c.register_default_checks
 | `solid_queue` | `:solid_queue` | `Checks::SolidQueue` | `true` | `SolidQueue` is loaded |
 | `solid_cache` | `:solid_cache` | `Checks::SolidCache` | `false` | `SolidCache` is loaded |
 | `audit_retention` | `:audit_retention` | `StandardAudit::Checks::Retention` | `false` | `standard_audit` is loaded |
+| *contributed name* | *contributed name* | *contributor's class* | contributor's, else `false` | always (the gem is loaded) |
+
+The last row is every check another gem has
+[contributed](#contributing-checks-from-another-gem), after the built-ins in
+contribution order. `audit_retention` is the one built-in that names another
+gem's class; it is deprecated and goes once standard_audit contributes it.
+Until then nothing changes, and when standard_audit does contribute it, the
+contribution takes over the same key and position, so it never registers
+twice.
 
 A check whose backing library isn't loaded is skipped rather than registered
 to fail forever. A name that's already registered is skipped too, so it's safe
@@ -223,7 +232,8 @@ c.register_default_checks solid_cache: false,                 # jumpdrive: has S
 ```
 
 Returns the names it registered. Check order in the response follows
-registration order.
+registration order. An unknown key raises `ArgumentError` listing the known
+ones, including contributed names.
 
 ## EnvSpec
 
@@ -553,6 +563,82 @@ c.register_check :runner, "RunnerHealthCheck"
 ```
 
 **A check must never raise.** `Aggregator` rescues `StandardError` per check, so a buggy check degrades to `:fail` rather than 500ing the endpoint — but don't rely on that as the only line of defence. Route fallible work through `with_timing`.
+
+## Contributing checks from another gem
+
+A gem can offer a health check and declare the env vars it reads without
+depending on standard_health (and without standard_health knowing about it),
+through a Rails load hook:
+
+```ruby
+# lib/standard_id.rb (or its engine.rb). No `require "standard_health"`.
+ActiveSupport.on_load(:standard_health) do |health|
+  health.contribute_check :standard_id_migrations, "StandardId::Checks::Migrations"
+
+  health.contribute_env_vars "standard_id" do
+    recommended :STANDARD_ID_OAUTH_SIGNING_KEY, description: "Signs OAuth tokens"
+    forbidden :STANDARD_ID_BYPASS_CODE, in: %w[production],
+      description: "Fixed login code for staging; never in production"
+  end
+end
+```
+
+If standard_health is not in the bundle the block never runs. If it is, the
+block runs exactly once whichever gem is required first: standard_health runs
+`ActiveSupport.run_load_hooks(:standard_health, StandardHealth.contributions)`
+when it loads, which fires hooks registered earlier, and later hooks fire
+immediately. The block receives the `StandardHealth::Contributions` registry
+(an arity-0 block is `instance_eval`'d on it, as with any load hook).
+
+The registry is process-wide and separate from the configuration:
+`StandardHealth.reset_config!` does not clear it, so app and gem specs that
+reset config between examples keep every contribution.
+
+### `contribute_check(name, klass, critical: false, timeout: nil, **options)`
+
+Same arguments as `register_check`. The check is **not registered on its
+own**: it joins the set `register_default_checks` registers, so an app gets it
+only if it calls that, and can opt out or override it by name like a built-in:
+
+```ruby
+c.register_default_checks standard_id_migrations: false
+c.register_default_checks standard_id_migrations: { critical: true, timeout: 2 }
+```
+
+- Non-critical unless the contributor passes `critical: true`. Most gem checks
+  report drift (missing migrations, schema gaps) that should degrade, not pull
+  the instance out of rotation.
+- Pass the class as a String. It is resolved when the check runs, so the
+  gem's constant needn't be loadable when the hook fires.
+- `:database`, `:solid_queue` and `:solid_cache` are reserved and raise
+  `ArgumentError`. Re-contributing a name replaces it.
+- An app that registered the name itself keeps its own registration.
+- **Contribute when the gem is required** (top level of its main or engine
+  file). Under `Bundler.require` that is before any app initializer runs. A
+  check contributed after the app has called `register_default_checks` is not
+  registered retroactively; the gem prints a warning instead.
+
+### `contribute_env_vars(contributor, &block)`
+
+The block is the [EnvSpec](#envspec) DSL (`required`, `recommended`,
+`forbidden`, `group`). Each entry is grouped under `contributor` (a nested
+`group` label wins, as in any spec), and the declarations join the app's
+`env_spec` on `/diagnostics/env` and in `Checks::EnvSpecAudit`:
+
+- **The app wins.** If the app's `env_spec` declares a var at all, the gem's
+  entries for it are dropped, so an app can tighten or relax a gem's
+  declaration by declaring the var itself.
+- **No app `env_spec` is fine.** The contributions alone form the spec. With
+  neither, the audit stays empty, as before.
+- **Plain environment names only.** `in: %w[production]` works; `in: :live`
+  and `mode_alias` raise `ArgumentError` when the gem loads, because aliases
+  such as `:deployed` or `:live` are defined by each app, not by gems.
+- If two gems declare the same var, the first to contribute wins.
+- Re-contributing under the same `contributor` replaces its declarations.
+  Contributions are merged when the audit runs, so a late one still appears.
+
+`StandardHealth.config.effective_env_spec` returns the merged spec;
+`StandardHealth.config.env_spec` stays exactly what the app assigned.
 
 ## Opt-in checks
 
