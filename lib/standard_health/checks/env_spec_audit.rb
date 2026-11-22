@@ -74,7 +74,8 @@ module StandardHealth
       private
 
       def violating_rows
-        spec = ::StandardHealth.config.env_spec
+        # Includes env vars other gems contributed, as /diagnostics/env does.
+        spec = ::StandardHealth.config.effective_env_spec
         return [] unless spec
 
         # No `root:`. Resolving `consumed_by` paths does file IO per entry,

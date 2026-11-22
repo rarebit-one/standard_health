@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Other gems can contribute checks and env vars.** A gem registers
+  `ActiveSupport.on_load(:standard_health) { |health| ... }` with no
+  dependency on standard_health, and the block receives an object exposing
+  only `contribute_check` and `contribute_env_vars` (an arity-0 block is
+  `instance_eval`'d on it). standard_health runs the hook once when it loads,
+  so it works in either require order. Contribute at require time. See
+  "Contributing checks from another gem" in the README.
+  - `contribute_check(name, klass, critical: false, timeout: nil, **options)`
+    adds a check to the set `register_default_checks` registers. It is
+    non-critical unless the contributor says otherwise, and apps opt out or
+    override it by name (`register_default_checks(standard_id_migrations:
+    false)`). A check contributed after `register_default_checks` ran is not
+    registered; standard_health warns instead. Aggregate-tier contributions
+    are not supported yet.
+  - `contribute_env_vars(contributor) { ... }` declares env vars with the
+    `EnvSpec` DSL, grouped under the contributor. They join the app's spec on
+    `/diagnostics/env` and in `Checks::EnvSpecAudit`, and the app's own
+    declaration of a var wins. They may use plain environment names only, not
+    app mode aliases. With no app `env_spec`, the contributions alone form the
+    spec. If two gems declare the same var, the first to contribute wins and
+    a warning (once per process) names the var and both gems.
+  - The registry lives outside `Configuration`, so `reset_config!` keeps
+    contributions.
+- `Configuration#effective_env_spec`: the app's `env_spec` merged with
+  contributed env vars. `env_spec` still returns exactly what the app set.
+- `EnvSpec#reverse_merge(other)`: a new spec with the other spec's entries
+  for vars the receiver does not declare.
+- `Configuration#error_reporter`: an optional callable `(error, context)` that
+  receives the gem's own handled errors (a check raising on the aggregate
+  tier, a diagnostics assertion raising) instead of `Rails.error.report`. The
+  context keys are unchanged. nil (the default) keeps `Rails.error`.
+
+### Changed
+
+- **Nested `EnvSpec` groups combine their labels.** `group "A" do group "B"
+  ... end end` now tags entries `"A / B"` instead of `"B"`. No consumer app
+  nests groups today; a nested label in an audit row changes accordingly.
+- `register_default_checks` takes any known key (built-ins plus contributed
+  check names) instead of four fixed keywords. Existing calls behave the
+  same. An unknown key still raises `ArgumentError`, now listing the known
+  keys.
+
+### Deprecated
+
+- The hardcoded `audit_retention` entry in `Configuration::DEFAULT_CHECKS`
+  (the only default naming another gem's class). It keeps working. Once
+  standard_audit contributes `audit_retention`, the contribution replaces it
+  (same key and position, registered once), and a later release removes the
+  hardcoded entry.
+
 ## [0.8.0] - 2026-10-22
 
 ### Changed

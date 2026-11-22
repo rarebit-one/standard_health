@@ -21,7 +21,7 @@ module StandardHealth
     #   order. Never raises: an assertion that raises, returns a non-Hash, or
     #   returns an unknown status becomes an `:error` row.
     def run(config = StandardHealth.config)
-      config.diagnostics_assertions.map { |assertion| evaluate(assertion) }
+      config.diagnostics_assertions.map { |assertion| evaluate(assertion, config) }
     end
 
     # True when any row is `:error`. `:warn` is advisory.
@@ -29,7 +29,7 @@ module StandardHealth
       Array(rows).any? { |row| row[:status] == :error }
     end
 
-    def evaluate(assertion)
+    def evaluate(assertion, config)
       result = assertion.callable.call
       return invalid(assertion.name, "returned #{result.class}, expected a Hash") unless result.is_a?(Hash)
 
@@ -39,7 +39,7 @@ module StandardHealth
 
       { name: assertion.name }.merge(row.except(:name)).merge(status: status)
     rescue StandardError => e
-      report(e, assertion.name)
+      report(e, assertion.name, config)
       # The doctor tier is authenticated, so the message is shown (the /ready
       # redaction rationale does not apply); the class is kept separately
       # for grouping.
@@ -50,10 +50,9 @@ module StandardHealth
       { name: name, status: :error, error: "diagnostics assertion #{name} #{detail}" }
     end
 
-    def report(error, name)
-      return unless defined?(::Rails) && ::Rails.respond_to?(:error) && ::Rails.error
-
-      ::Rails.error.report(error, handled: true, severity: :warning,
+    # To `Configuration#error_reporter` when set, else `Rails.error`.
+    def report(error, name, config)
+      config.report_error(error, severity: :warning,
         context: { diagnostics_assertion: name }, source: "standard_health")
     rescue StandardError
       nil

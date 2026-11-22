@@ -17,12 +17,13 @@ module StandardHealth
   class DiagnosticsController < DiagnosticsApplicationController
     include DiagnosticsAuthentication
 
-    # Audits the configured EnvSpec against the current process ENV and
-    # returns the result as JSON. When no EnvSpec is configured the
+    # Audits the configured EnvSpec, plus env vars other gems contributed
+    # (`Configuration#effective_env_spec`), against the current process ENV
+    # and returns the result as JSON. When there is no spec at all the
     # endpoint returns an empty audit rather than a 404 so callers don't
     # have to special-case "feature not enabled".
     def env
-      spec = StandardHealth.config.env_spec
+      spec = StandardHealth.config.effective_env_spec
       mode = ENV["APP_ENVIRONMENT"].to_s
       root = defined?(Rails) ? Rails.root : nil
 

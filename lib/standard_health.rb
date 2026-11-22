@@ -1,11 +1,13 @@
 # frozen_string_literal: true
 
+require "active_support/lazy_load_hooks"
 require "standard_health/version"
 require "standard_health/probe_paths"
 require "standard_health/engine"
 require "standard_health/diagnostics_basic_auth"
 require "standard_health/configuration"
 require "standard_health/env_spec"
+require "standard_health/contributions"
 require "standard_health/check"
 require "standard_health/checks/active_record"
 require "standard_health/checks/solid_queue"
@@ -42,9 +44,23 @@ module StandardHealth
     end
 
     # Mostly useful in tests — wipes the singleton config so each example
-    # gets a clean slate.
+    # gets a clean slate. Contributions from other gems are NOT wiped: they
+    # live in `contributions`, and the new config reads the same registry.
     def reset_config!
       @config = Configuration.new
+    end
+
+    # Checks and env vars other gems contributed through
+    # `ActiveSupport.on_load(:standard_health)`. See `Contributions`.
+    # Process-wide and deliberately not reset by `reset_config!`: the hooks
+    # run once per process, so nothing would re-contribute.
+    #
+    # Contributing gems never see this registry, only its
+    # `Contributions::Facade`.
+    #
+    # @api private
+    def contributions
+      @contributions ||= Contributions.new
     end
 
     # The subscriber registry. Wired at boot by the engine initializer; also
@@ -91,3 +107,9 @@ module StandardHealth
     end
   end
 end
+
+# Hands the registry's contributor facade (`contribute_check` and
+# `contribute_env_vars`, nothing else) to every
+# `ActiveSupport.on_load(:standard_health)` hook: those already registered by
+# gems required earlier run now, and any registered later run immediately.
+ActiveSupport.run_load_hooks(:standard_health, StandardHealth.contributions.facade)

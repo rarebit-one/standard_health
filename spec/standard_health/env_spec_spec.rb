@@ -258,18 +258,22 @@ RSpec.describe StandardHealth::EnvSpec do
       expect(by_name[:OUTSIDE]).not_to have_key(:group)
     end
 
-    it "uses the innermost label when group blocks are nested" do
+    it "combines the labels of nested group blocks, outermost first" do
       spec = described_class.define do
         group "Outer" do
+          required :OUTER_ONLY
           group "Inner" do
             required :NESTED
           end
+          required :OUTER_AGAIN
         end
       end
 
-      audit = spec.audit({}, mode: "production")
+      by_name = spec.audit({}, mode: "production").each_with_object({}) { |row, h| h[row[:name]] = row }
 
-      expect(audit.first).to include(name: :NESTED, group: "Inner")
+      expect(by_name[:NESTED]).to include(group: "Outer / Inner")
+      expect(by_name[:OUTER_ONLY]).to include(group: "Outer")
+      expect(by_name[:OUTER_AGAIN]).to include(group: "Outer")
     end
 
     it "raises ArgumentError when group is called without a block" do
@@ -584,6 +588,45 @@ RSpec.describe StandardHealth::EnvSpec do
       spec = described_class.define { required :PLAIN }
 
       expect(spec.audit({ "PLAIN" => "x" }, mode: "x").first).not_to have_key(:expected_value)
+    end
+  end
+
+  describe "#reverse_merge" do
+    let(:app) do
+      described_class.define do
+        mode_alias :live, %w[production]
+        required :SHARED, in: :live
+        required :APP_ONLY
+      end
+    end
+
+    let(:gem_spec) do
+      described_class.define do
+        mode_alias :live, %w[staging]
+        mode_alias :gemish, %w[preview]
+        recommended :SHARED
+        recommended :SHARED, in: %w[staging]
+        forbidden :GEM_ONLY, in: %w[production]
+      end
+    end
+
+    it "keeps every receiver entry, then the other's entries for names the receiver does not declare" do
+      merged = app.reverse_merge(gem_spec)
+
+      expect(merged.entries.map { |e| [e.name, e.level] }).to eq([
+        [:SHARED, :required], [:APP_ONLY, :required], [:GEM_ONLY, :forbidden]
+      ])
+    end
+
+    it "combines mode aliases with the receiver's winning" do
+      expect(app.reverse_merge(gem_spec).mode_aliases).to eq(live: %w[production], gemish: %w[preview])
+    end
+
+    it "modifies neither spec" do
+      app.reverse_merge(gem_spec)
+
+      expect(app.entries.size).to eq(2)
+      expect(gem_spec.entries.size).to eq(3)
     end
   end
 end
