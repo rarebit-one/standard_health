@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-23
+
 ### Added
 
 - **Other gems can contribute checks and env vars.** A gem registers
