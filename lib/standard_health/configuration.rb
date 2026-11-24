@@ -136,8 +136,8 @@ module StandardHealth
     # --- Aggregate tier (0.6.0) ----------------------------------------
     #
     # When true, the engine serves the aggregate tier at its root — `GET
-    # /health` for the usual mount — as { status, checks, circuits,
-    # generated_at }. OFF by default: with it off the engine draws no
+    # /health` for the usual mount — as { status, checks, dependencies,
+    # circuits, generated_at }. OFF by default: with it off the engine draws no
     # matching route and a bare /health cascades to the host exactly as
     # before. See `StandardHealth::AggregateReport`.
     attr_accessor :aggregate_endpoint
@@ -149,7 +149,30 @@ module StandardHealth
 
     # Whether to fold `StandardCircuit.health_report` into the aggregate tier
     # when StandardCircuit is loaded. Default true.
+    #
+    # DEPRECATED (0.10.0): the `circuits` section is superseded by
+    # `dependencies` (see `aggregate_dependencies`) and is removed in 1.0.
+    # Once a gem contributes dependency rows (standard_circuit >= 0.8), the
+    # section is still rendered but no longer counts toward the status. Set
+    # false once nothing reads `circuits`.
     attr_accessor :aggregate_circuits
+
+    # Whether the aggregate tier renders the dependency rows other gems
+    # contributed (`Contributions#contribute_dependencies`) as `dependencies`
+    # and rolls its status up from them. Default true. Has no effect until a
+    # gem contributes rows.
+    attr_accessor :aggregate_dependencies
+
+    # Whether /ready also renders contributed dependency rows (0.10.0). OFF
+    # by default, and turning it on changes rotation: a `:critical`
+    # dependency reporting :unavailable then makes /ready 503. No other row
+    # changes the readiness status (a degraded or non-critical dependency is
+    # rendered and nothing more), and /alive is never affected.
+    #
+    # Think before enabling it. Every instance sees the same upstream, so a
+    # critical dependency's outage takes every instance out of rotation at
+    # once, including for requests that never call that dependency.
+    attr_accessor :ready_dependencies
 
     # Prefix for emitted metric names, e.g. "health.check.duration".
     attr_accessor :metric_prefix
@@ -290,6 +313,8 @@ module StandardHealth
       @aggregate_endpoint = false
       @aggregate_readiness_checks = true
       @aggregate_circuits = true
+      @aggregate_dependencies = true
+      @ready_dependencies = false
 
       @instrumentation_enabled = true
       @logger = nil

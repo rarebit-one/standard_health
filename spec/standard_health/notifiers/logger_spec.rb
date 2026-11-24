@@ -97,5 +97,33 @@ RSpec.describe StandardHealth::Notifiers::Logger do
       expect(level).to eq(:error)
       expect(message).to include("circuit report failed: Redis::CannotConnectError: redis down")
     end
+
+    context "with dependency rows (0.10.0)" do
+      it "names the dependencies that are not ok, and not the same breakers again as red circuits" do
+        aggregate(status: :unavailable, failed: [], failures: [], dependencies_status: :unavailable,
+                  failing_dependencies: %w[stripe], circuits_status: :unavailable, red_circuits: [:stripe])
+
+        level, message = lines.first
+        expect(level).to eq(:error)
+        expect(message).to include("dependencies not ok: stripe")
+        expect(message).not_to include("circuits red")
+      end
+
+      it "names red circuits again when the dependency rows could not be read" do
+        aggregate(status: :unavailable, failed: [], failures: [], dependencies_status: :degraded,
+                  failing_dependencies: [], dependencies_error_class: "IOError",
+                  dependencies_error_message: "redis down", red_circuits: [:stripe])
+
+        message = lines.first.last
+        expect(message).to include("dependency report failed: IOError: redis down", "circuits red: stripe")
+      end
+    end
+  end
+
+  it "names critical dependencies that failed readiness (ready_dependencies)" do
+    notifier.call("standard_health.ready.evaluated",
+                  { status: :unavailable, failed: [], failures: [], failing_dependencies: %w[stripe] })
+
+    expect(lines.first.last).to include("readiness unavailable", "dependencies unavailable: stripe")
   end
 end

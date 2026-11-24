@@ -29,6 +29,9 @@ See the `/worktree` and `/start` skills for full conventions.
 - `lib/standard_health/check.rb` — base class with `with_timing` helper.
 - `lib/standard_health/checks/` — built-ins for ActiveRecord, SolidQueue, SolidCache.
 - `lib/standard_health/aggregator.rb` — runs checks, classifies overall status.
+- `lib/standard_health/aggregate_report.rb` — the aggregate tier (checks + dependency rows + deprecated circuits).
+- `lib/standard_health/contributions.rb` — what other gems contribute through the load hook (checks, env vars, dependency rows).
+- `lib/standard_health/dependency_report.rb` — reads, sanitises and rolls up contributed dependency rows.
 - `lib/standard_health/env_spec.rb` — DSL for declaring required/recommended env vars.
 - `app/controllers/standard_health/` — `HealthController` (alive/ready) + `DiagnosticsController` (env audit).
 - `config/routes.rb` — engine routes.

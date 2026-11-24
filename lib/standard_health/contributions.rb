@@ -26,13 +26,15 @@ module StandardHealth
   # and `StandardHealth.reset_config!` (which app and gem specs call before
   # every example) must not lose what they contributed.
   #
-  # Contributor-facing API: `#contribute_check` and `#contribute_env_vars`,
-  # the only two methods the facade exposes. The readers below them are how
-  # `Configuration` consumes the registry, and are not part of the public API.
+  # Contributor-facing API: `#contribute_check`, `#contribute_env_vars` and
+  # (0.10.0) `#contribute_dependencies`, the only methods the facade
+  # exposes. The readers below them are how `Configuration` and the tiers
+  # consume the registry, and are not part of the public API.
   class Contributions
-    # What `ActiveSupport.on_load(:standard_health)` yields: the two
-    # contributor methods and nothing else, so a contributing gem cannot come
-    # to depend on the registry's readers.
+    # What `ActiveSupport.on_load(:standard_health)` yields: the contributor
+    # methods and nothing else, so a contributing gem cannot come to depend on
+    # the registry's readers. A contributor that must also work with an older
+    # standard_health checks `respond_to?(:contribute_dependencies)` first.
     class Facade
       def initialize(registry)
         @registry = registry
@@ -46,6 +48,11 @@ module StandardHealth
       # @see Contributions#contribute_env_vars
       def contribute_env_vars(...)
         @registry.contribute_env_vars(...)
+      end
+
+      # @see Contributions#contribute_dependencies
+      def contribute_dependencies(...)
+        @registry.contribute_dependencies(...)
       end
     end
 
@@ -61,6 +68,7 @@ module StandardHealth
     def initialize
       @checks = {}
       @env_specs = {}
+      @dependency_readers = {}
       @defaults_applied = false
       @shadow_warnings = Set.new
     end
@@ -137,6 +145,38 @@ module StandardHealth
       warn_shadowed_env_vars(label, spec)
 
       @env_specs[label] = spec
+    end
+
+    # Offer rows describing the external services the app depends on. The
+    # block takes no arguments and returns an Array of Hashes, one per
+    # dependency; it is called on every evaluation of a tier that renders
+    # dependencies (the aggregate tier, and /ready with
+    # `config.ready_dependencies`), so it must be cheap and read cached state.
+    #
+    #   ActiveSupport.on_load(:standard_health) do |health|
+    #     next unless health.respond_to?(:contribute_dependencies) # standard_health < 0.10
+    #     health.contribute_dependencies(:standard_circuit) { StandardCircuit.health_rows }
+    #   end
+    #
+    # See `DependencyReport` for the row shape and the roll-up. Only a
+    # `criticality: :critical` row can make a tier :unavailable.
+    #
+    # Once any rows are contributed, the aggregate tier rolls its status up
+    # from them and stops counting the deprecated `circuits` fold-in, which is
+    # still rendered (see `AggregateReport`).
+    #
+    # Re-contributing under the same `source` replaces its reader. Rows are
+    # read per request, so a late contribution still shows up.
+    def contribute_dependencies(source, &reader)
+      raise ArgumentError, "contribute_dependencies(#{source.inspect}) needs a block" unless reader
+
+      @dependency_readers[source.to_sym] = reader
+    end
+
+    # @api private
+    # @return [Hash{Symbol => Proc}] dependency row readers, by source
+    def dependency_readers
+      @dependency_readers.dup
     end
 
     # @api private

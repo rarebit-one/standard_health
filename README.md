@@ -7,7 +7,7 @@ Mount it once and you get:
 - `GET /health/alive` — liveness probe (always 200 if Rails is up)
 - `GET /health/ready` — readiness probe; runs every registered check and rolls them up into an overall status
 - `GET /health/diagnostics/env` — audits the host app's `ENV` against a declarative spec
-- `GET /health` — *opt-in* aggregate tier: checks plus StandardCircuit state (see [below](#let-the-engine-serve-the-aggregate-tier-060))
+- `GET /health` — *opt-in* aggregate tier: checks plus dependency (StandardCircuit) state (see [below](#let-the-engine-serve-the-aggregate-tier-060))
 
 Built-in checks cover ActiveRecord, SolidQueue, and SolidCache. Host apps can register additional checks via the configuration block.
 
@@ -89,7 +89,8 @@ it at its root:
 StandardHealth.configure do |c|
   c.aggregate_endpoint = true
   # c.aggregate_readiness_checks = true    # default: re-run the register_check registry
-  # c.aggregate_circuits = true            # default: fold StandardCircuit.health_report in, when loaded
+  # c.aggregate_dependencies = true        # default: render contributed dependency rows (0.10.0)
+  # c.aggregate_circuits = true            # default, DEPRECATED: fold StandardCircuit.health_report in
   c.register_aggregate_check :solid_cable, StandardHealth::Checks::SolidCable  # aggregate-ONLY
 end
 ```
@@ -105,9 +106,12 @@ end
 
 | Status | HTTP | When |
 |---|---|---|
-| `unavailable` | 503 | a critical check failed, or a `:critical` circuit is red |
-| `degraded` | 200 | a non-critical check failed, a check was skipped by the total budget, or the circuit roll-up is `:degraded` |
+| `unavailable` | 503 | a critical check failed, or a `:critical` dependency is `unavailable` (without dependency rows: a `:critical` circuit is red) |
+| `degraded` | 200 | a non-critical check failed, a check was skipped by the total budget, or a dependency is `degraded` (without dependency rows: the circuit roll-up is `:degraded`) |
 | `ok` | 200 | otherwise |
+
+With standard_circuit 0.8 or later the body also carries `dependencies`; see
+[Dependency rows](#dependency-rows-0100).
 
 **The aggregate tier re-runs your readiness checks by default.** With
 `aggregate_readiness_checks` on (the default), every `register_check`
@@ -164,6 +168,69 @@ of where your own route is drawn relative to the mount.
 
 Aggregate evaluations emit `standard_health.aggregate.evaluated`, **not**
 `ready.evaluated` — see [Instrumentation](#instrumentation).
+
+### Dependency rows (0.10.0)
+
+A gem can describe the external services the app depends on, one row per
+service, through the load hook (see
+[`contribute_dependencies`](#contribute_dependenciessource-block)).
+standard_circuit 0.8 does, for every dependency it has registered. The
+aggregate tier renders the rows as `dependencies` and rolls its status up from
+them:
+
+```json
+{ "status": "degraded",
+  "checks": [{ "name": "database", "critical": true, "status": "ok", "latency_ms": 2 }],
+  "dependencies": [
+    { "name": "stripe", "status": "degraded", "criticality": "critical",
+      "affected_purposes": ["checkout"], "reasons": ["error_rate"], "metrics_only": false,
+      "circuits": [{ "name": "stripe", "color": "green", "locked": false }],
+      "measurements": { "stripe:errorRate": 0.18, "stripe:p95Ms": 2140,
+                        "stripe:lastSuccessAt": "2026-11-23T04:12:09Z", "stripe:fallbackRate": 0.04 } }],
+  "circuits": [{ "name": "stripe", "color": "green", "locked": false, "criticality": "critical" }],
+  "generated_at": "2026-11-25T00:00:00Z" }
+```
+
+- **Only a `:critical` dependency can make a tier `unavailable`.** A
+  non-critical row that says `unavailable` is rendered and counted as
+  `degraded`. The contributing gem decides each row's status; for
+  standard_circuit see its README.
+- **Only known keys are rendered**: `name`, `status`, `criticality`,
+  `affected_purposes`, `reasons`, `metrics_only`, `circuits` (`name`, `color`,
+  `locked`), `measurements` and `probe` (reserved for a cached active-probe
+  result). The body is anonymous, so a contributor cannot add an error message
+  to it. An unknown status reads as `degraded`, never `ok`.
+- **`circuits` is deprecated** and is removed in 1.0. While it stays, it is
+  still rendered, but once rows are contributed it no longer counts toward the
+  status: both sections describe the same breakers, and counting both would
+  report one red breaker twice. Set `aggregate_circuits = false` once nothing
+  reads it. The `red_circuits` log fragment is dropped for the same reason.
+- **A reader that raises** (circuit store down) degrades the tier and renders
+  `dependencies_error: { error_class, error_code }`. The circuit roll-up then
+  counts again, so a broken reader cannot hide a red critical circuit.
+- **An app on standard_circuit 0.7** contributes no rows. Its body and status
+  are exactly what 0.9 served. `aggregate_dependencies = false` restores that
+  shape on 0.8 too.
+
+#### Dependencies on `/ready`: `ready_dependencies` (off by default)
+
+`/ready` is the rotation gate, so it ignores dependency rows unless you opt
+in:
+
+```ruby
+c.ready_dependencies = true
+```
+
+Then `/ready` renders `dependencies` too, and **a `:critical` dependency that
+is `unavailable` makes it 503**. Nothing else about the rows changes the
+readiness status: a degraded or non-critical dependency is rendered and that
+is all, and a reader that raises is rendered as `dependencies_error` while the
+status stays as the checks left it. `/alive` never looks at dependencies.
+
+Think before you enable it. Every instance sees the same upstream, so a
+critical dependency's outage takes every instance out of rotation at once,
+including for requests that never call it. The aggregate tier's 503 is
+usually the better place for an uptime monitor to see it.
 
 ## Configuration
 
@@ -590,8 +657,10 @@ block runs exactly once whichever gem is required first: standard_health runs
 `ActiveSupport.run_load_hooks(:standard_health, ...)` when it loads, which
 fires hooks registered earlier, and later hooks fire immediately.
 
-The block receives an object with exactly two methods, `contribute_check`
-and `contribute_env_vars`, and nothing else. An arity-0 block is
+The block receives an object with exactly these methods and nothing else:
+`contribute_check`, `contribute_env_vars` and, since 0.10.0,
+`contribute_dependencies`. A gem that also supports older standard_health
+checks `respond_to?(:contribute_dependencies)` first. An arity-0 block is
 `instance_eval`'d on that same object, as with any load hook, so this works
 too:
 
@@ -663,6 +732,27 @@ on `/diagnostics/env` and in `Checks::EnvSpecAudit`:
 
 `StandardHealth.config.effective_env_spec` returns the merged spec;
 `StandardHealth.config.env_spec` stays exactly what the app assigned.
+
+### `contribute_dependencies(source, &block)`
+
+Offer rows describing the external services the app depends on (0.10.0). The
+block takes no arguments and returns an Array of Hashes, one per dependency.
+It runs on every evaluation of a tier that renders dependencies, so it must
+be cheap and read state the gem already holds. See
+[Dependency rows](#dependency-rows-0100) for the row keys and the roll-up.
+
+```ruby
+ActiveSupport.on_load(:standard_health) do |health|
+  # standard_health < 0.10 has no contribute_dependencies: say nothing, and
+  # let it fold StandardCircuit.health_report in as before.
+  next unless health.respond_to?(:contribute_dependencies)
+
+  health.contribute_dependencies(:standard_circuit) { StandardCircuit.health_rows }
+end
+```
+
+Re-contributing under the same `source` replaces its reader. Rows are read per
+request, so a late contribution still shows up.
 
 ## Opt-in checks
 
@@ -971,8 +1061,8 @@ The gem emits events on whichever bus is live — `Rails.event` on Rails 8.1+,
 |---|---|
 | `standard_health.check.completed` | `name`, `critical`, `status`, `latency_ms`, `error_class`, `error_message` |
 | `standard_health.check.timed_out` | `name`, `critical`, `timeout_s` |
-| `standard_health.ready.evaluated` | `status`, `duration_ms`, `failed[]`, `failures[]` |
-| `standard_health.aggregate.evaluated` | `status`, `duration_ms`, `failed[]`, `failures[]`, `circuits_status`, `red_circuits[]` (0.6.0, only with `aggregate_endpoint`) |
+| `standard_health.ready.evaluated` | `status`, `duration_ms`, `failed[]`, `failures[]`; plus `failing_dependencies[]` (critical dependencies that failed readiness) with `ready_dependencies` (0.10.0) |
+| `standard_health.aggregate.evaluated` | `status`, `duration_ms`, `failed[]`, `failures[]`, `circuits_status`, `red_circuits[]` (0.6.0, only with `aggregate_endpoint`); plus `dependencies_status`, `failing_dependencies[]` and, when a reader raised, `dependencies_error_class` / `dependencies_error_message` (0.10.0, when rows are contributed) |
 
 Checks run by the aggregate tier also emit `check.completed` / `check.timed_out`,
 carrying `tier: :aggregate`; readiness payloads carry no `tier` key, exactly as

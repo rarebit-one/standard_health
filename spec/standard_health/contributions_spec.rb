@@ -165,11 +165,42 @@ RSpec.describe StandardHealth::Contributions do
     end
   end
 
+  describe "#contribute_dependencies" do
+    it "records a reader per source, called only when the rows are read" do
+      calls = 0
+      registry.contribute_dependencies(:standard_circuit) { calls += 1; [] }
+
+      expect(calls).to eq(0)
+      expect(registry.dependency_readers.keys).to eq([:standard_circuit])
+      expect(registry.dependency_readers[:standard_circuit].call).to eq([])
+      expect(calls).to eq(1)
+    end
+
+    it "replaces a re-contributed source" do
+      registry.contribute_dependencies("standard_circuit") { [{ name: "old" }] }
+      registry.contribute_dependencies(:standard_circuit) { [{ name: "new" }] }
+
+      expect(registry.dependency_readers.transform_values(&:call)).to eq(standard_circuit: [{ name: "new" }])
+    end
+
+    it "needs a block" do
+      expect { registry.contribute_dependencies(:standard_circuit) }.to raise_error(ArgumentError, /needs a block/)
+    end
+
+    it "hands out a copy, so a reader of the registry cannot change it" do
+      registry.dependency_readers[:intruder] = -> { [] }
+
+      expect(registry.dependency_readers).to be_empty
+    end
+  end
+
   describe "#facade" do
     subject(:facade) { registry.facade }
 
-    it "exposes only the two contributor methods" do
-      expect(facade.public_methods(false)).to contain_exactly(:contribute_check, :contribute_env_vars)
+    it "exposes only the contributor methods" do
+      expect(facade.public_methods(false)).to contain_exactly(:contribute_check, :contribute_env_vars,
+                                                              :contribute_dependencies)
+      expect(facade).not_to respond_to(:dependency_readers)
       expect(facade).not_to respond_to(:checks)
       expect(facade).not_to respond_to(:env_spec)
       expect(facade).not_to respond_to(:defaults_applied!)
@@ -178,7 +209,9 @@ RSpec.describe StandardHealth::Contributions do
     it "contributes to the registry" do
       facade.contribute_check :standard_id_migrations, "StandardId::Checks::Migrations", critical: true
       facade.contribute_env_vars("standard_id") { recommended :STANDARD_ID_OAUTH_SIGNING_KEY }
+      facade.contribute_dependencies(:standard_circuit) { [] }
 
+      expect(registry.dependency_readers.keys).to eq([:standard_circuit])
       expect(registry.checks.map { |c| [c.name, c.critical] }).to eq([[:standard_id_migrations, true]])
       expect(registry.env_spec.entries.map(&:name)).to eq([:STANDARD_ID_OAUTH_SIGNING_KEY])
     end

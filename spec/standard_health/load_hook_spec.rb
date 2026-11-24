@@ -34,12 +34,22 @@ RSpec.describe "ActiveSupport.on_load(:standard_health)" do
         contribute_env_vars("late_gem") { forbidden :LATE_VAR, in: %w[production] }
       end
 
+      # A gem that contributes dependency rows, guarded the way one that also
+      # supports standard_health < 0.10 must be (standard_circuit >= 0.8).
+      ActiveSupport.on_load(:standard_health) do |health|
+        next unless health.respond_to?(:contribute_dependencies)
+
+        health.contribute_dependencies(:rows_gem) { [{ name: "stripe", status: :ok, criticality: :critical }] }
+      end
+
       StandardHealth.reset_config! # contributions must survive this
       names = StandardHealth.config.register_default_checks
       checks = StandardHealth.config.checks.to_h { |r| [r.name, [r.klass, r.critical?]] }
       env = StandardHealth.config.effective_env_spec.entries.map { |e| [e.name, e.group] }
 
-      puts JSON.generate(names: names, checks: checks, env: env, yielded: yielded)
+      dependencies = StandardHealth::DependencyReport.call[:dependencies]
+
+      puts JSON.generate(names: names, checks: checks, env: env, yielded: yielded, dependencies: dependencies)
     RUBY
   end
 
@@ -58,5 +68,6 @@ RSpec.describe "ActiveSupport.on_load(:standard_health)" do
     expect(result["env"]).to eq([%w[EARLY_VAR early_gem], %w[LATE_VAR late_gem]])
     # The hook sees the narrow facade, not the registry and its readers.
     expect(result["yielded"]).to eq(["StandardHealth::Contributions::Facade", false])
+    expect(result["dependencies"]).to eq([{ "name" => "stripe", "status" => "ok", "criticality" => "critical" }])
   end
 end

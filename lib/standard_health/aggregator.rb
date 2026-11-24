@@ -64,15 +64,17 @@ module StandardHealth
         end
       end
 
-      duration_ms = ((monotonic - started) * 1000).round
       status = overall_status(check_rows)
 
       failing = failing_rows(check_rows)
 
       return { status: status, checks: check_rows, generated_at: now.iso8601 } unless tier == :ready
 
-      emit(
-        "standard_health.ready.evaluated",
+      dependencies = ready_dependencies
+      status = :unavailable if dependencies && unavailable_dependencies(dependencies).any?
+      duration_ms = ((monotonic - started) * 1000).round
+
+      payload = {
         status: status,
         duration_ms: duration_ms,
         failed: failing.map { |r| r[:name] },
@@ -84,14 +86,38 @@ module StandardHealth
         # message only existed on check.completed, redaction would delete the
         # last copy instead of relocating it.
         failures: failure_details(failing)
-      )
-
-      {
-        status: status,
-        checks: check_rows,
-        generated_at: now.iso8601
       }
+      payload[:failing_dependencies] = unavailable_dependencies(dependencies) if dependencies
+      emit("standard_health.ready.evaluated", **payload)
+
+      result = { status: status, checks: check_rows }
+      if dependencies
+        result[:dependencies] = dependencies[:dependencies]
+        result[:dependencies_error] = dependencies[:error] if dependencies[:error]
+      end
+      result[:generated_at] = now.iso8601
+      result
     end
+
+    # Contributed dependency rows for /ready, or nil unless
+    # `config.ready_dependencies` is on and some gem contributes them. Only a
+    # :critical dependency reporting :unavailable affects readiness: a
+    # degraded or non-critical row is rendered and nothing more, and a reader
+    # that fails is rendered as `dependencies_error` without touching the
+    # status (not knowing is no reason to leave rotation). @api private
+    def self.ready_dependencies
+      return nil unless StandardHealth.config.ready_dependencies
+
+      DependencyReport.call
+    rescue StandardError
+      nil
+    end
+    private_class_method :ready_dependencies
+
+    def self.unavailable_dependencies(dependencies)
+      dependencies[:dependencies].select { |row| row[:status] == :unavailable }.map { |row| row[:name] }
+    end
+    private_class_method :unavailable_dependencies
 
     # The rows an evaluation event reports as failing: everything that is not
     # :ok, except a check that reported :skipped itself (not applicable, so

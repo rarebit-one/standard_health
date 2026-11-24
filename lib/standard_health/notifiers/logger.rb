@@ -56,6 +56,7 @@ module StandardHealth
 
         message = "[StandardHealth] readiness #{status}" \
                   "#{detail(payload)}" \
+                  "#{dependency_detail(payload, "dependencies unavailable")}" \
                   "#{payload[:duration_ms] ? " (#{payload[:duration_ms]}ms)" : ""}"
 
         case status.to_sym
@@ -72,15 +73,30 @@ module StandardHealth
         status = payload[:status]
         return if status.nil? || status.to_sym == :ok
 
-        circuits = Array(payload[:red_circuits])
         message = +"[StandardHealth] aggregate #{status}#{detail(payload)}"
-        message << " — circuits red: #{circuits.join(", ")}" unless circuits.empty?
+        message << dependency_detail(payload, "dependencies not ok")
+        if payload[:dependencies_error_class]
+          message << " — dependency report failed: #{payload[:dependencies_error_class]}: " \
+                     "#{payload[:dependencies_error_message]}"
+        end
+        # Dependency rows (0.10.0) describe the same breakers as the
+        # deprecated circuit fold-in; name the red circuits only when the rows
+        # are absent or could not be read, so one red breaker is logged once.
+        circuits = Array(payload[:red_circuits])
+        if !circuits.empty? && (!payload.key?(:dependencies_status) || payload[:dependencies_error_class])
+          message << " — circuits red: #{circuits.join(", ")}"
+        end
         if payload[:circuits_error_class]
           message << " — circuit report failed: #{payload[:circuits_error_class]}: #{payload[:circuits_error_message]}"
         end
 
         emit_log(status.to_sym == :unavailable ? :error : :warn, message)
         message
+      end
+
+      def dependency_detail(payload, label)
+        names = Array(payload[:failing_dependencies])
+        names.empty? ? "" : " — #{label}: #{names.join(", ")}"
       end
 
       def log_timeout(payload)

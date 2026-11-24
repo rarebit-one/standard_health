@@ -11,7 +11,9 @@ module StandardHealth
 
     # Readiness probe. Runs every registered check and returns:
     #   200 if the rolled-up status is :ok or :degraded
-    #   503 if any critical check failed (:unavailable)
+    #   503 if any critical check failed (:unavailable), or, with
+    #       `config.ready_dependencies` on (default off), a :critical
+    #       dependency is :unavailable
     #
     # Failure detail is REDACTED by default — see StandardHealth::Redactor.
     # This endpoint is unauthenticated so probes need no credentials, and a
@@ -26,9 +28,10 @@ module StandardHealth
     end
 
     # Aggregate tier (0.6.0, opt-in via `config.aggregate_endpoint`; the route
-    # does not match otherwise). Checks + StandardCircuit state in one body —
-    # see StandardHealth::AggregateReport. 503 only on :unavailable, i.e. a
-    # critical check failure or a :critical circuit RED. Redacted exactly like
+    # does not match otherwise). Checks + dependency rows (+ the deprecated
+    # StandardCircuit fold-in) in one body — see StandardHealth::AggregateReport.
+    # 503 only on :unavailable, i.e. a critical check failure or a :critical
+    # dependency (circuit) that is unavailable. Redacted exactly like
     # /ready, with the same break-glass.
     def aggregate
       report = StandardHealth::AggregateReport.call

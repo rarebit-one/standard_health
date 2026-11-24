@@ -138,6 +138,15 @@ RSpec.describe StandardHealth::Notifiers::Sentry do
     expect(captures.map { |c| c[:level] }).to eq([:warning, :error])
   end
 
+  it "names a critical dependency that failed readiness (ready_dependencies, 0.10.0)" do
+    notifier = described_class.new
+    notifier.call("standard_health.ready.evaluated",
+                  { status: :unavailable, failed: [:db], failing_dependencies: ["stripe"], duration_ms: 5 })
+
+    expect(captures.first[:message]).to eq("Health unavailable: db, dependency stripe")
+    expect(captures.first[:extra]).to include(failed: [:db], failed_dependencies: ["stripe"])
+  end
+
   it "ignores events other than ready.evaluated" do
     notifier = described_class.new
     notifier.call("standard_health.check.completed", { name: :db, status: :fail })
