@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dependency rows.** A gem can now describe the external services the app
+  depends on, one row per service, through the load hook:
+  `health.contribute_dependencies(source) { rows }`. The block is read on each
+  request. standard_circuit 0.8 uses it for every registered dependency. See
+  "Dependency rows" in the README.
+  - The aggregate tier renders the rows as `dependencies` and rolls its status
+    up from them (`aggregate_dependencies`, default true). Only a `:critical`
+    row can make a tier `unavailable`; a non-critical row that says
+    `unavailable` counts, and renders, as `degraded`. An unknown status reads
+    as `degraded`.
+  - Only known row keys are rendered (`name`, `status`, `criticality`,
+    `affected_purposes`, `reasons`, `metrics_only`, `circuits`,
+    `measurements`, and `probe`, reserved for cached probe results), so a
+    contributor cannot put an error message into the anonymous body.
+  - A reader that raises degrades the tier with
+    `dependencies_error: { error_class, error_code }`, never a 500.
+  - `aggregate.evaluated` gains `dependencies_status`,
+    `failing_dependencies[]` and, on a reader failure,
+    `dependencies_error_class` / `dependencies_error_message`. The Logger
+    notifier names the dependencies that are not ok.
+- **`ready_dependencies`, off by default.** When on, `/ready` renders the rows
+  too, and a `:critical` dependency that is `unavailable` makes it 503. No
+  other row changes readiness, a failed reader leaves the status alone, and
+  `/alive` never looks at dependencies. `ready.evaluated` then carries
+  `failing_dependencies[]`, which the Logger and Sentry notifiers name.
+  Turning it on changes rotation: read the README first.
+
+### Deprecated
+
+- **The aggregate `circuits` section** (the `StandardCircuit.health_report`
+  fold-in, `aggregate_circuits`). It is superseded by `dependencies` and is
+  removed in 1.0. Until then it is still rendered. Once a gem contributes
+  dependency rows it no longer counts toward the aggregate status, since both
+  sections describe the same breakers and one red breaker would otherwise
+  count twice. If reading the rows fails, the circuit roll-up counts again.
+  Set `aggregate_circuits = false` once nothing reads `circuits`.
+
+### Compatibility
+
+- With standard_circuit 0.7 (no rows contributed), every tier serves exactly
+  what 0.9.0 served. With standard_circuit 0.8 on standard_health 0.9.0,
+  standard_circuit contributes nothing and 0.9.0 keeps folding circuits in.
+- One status can change on the aggregate tier with standard_circuit 0.8: a
+  `:standard` dependency whose breaker is half-open reports `degraded`, where
+  the circuit roll-up said `ok`. See standard_circuit's CHANGELOG.
+
 ## [0.9.0] - 2026-11-23
 
 ### Added

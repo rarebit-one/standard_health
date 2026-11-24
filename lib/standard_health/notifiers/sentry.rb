@@ -115,12 +115,17 @@ module StandardHealth
 
       def capture(status, payload)
         failed = Array(payload[:failed])
+        # Critical dependencies that failed readiness (`ready_dependencies`,
+        # 0.10.0). Named in the message too: otherwise a 503 caused only by a
+        # dependency would read "Health unavailable" with no reason.
+        failed_dependencies = Array(payload[:failing_dependencies])
+        named = failed + failed_dependencies.map { |name| "dependency #{name}" }
         level = status == :unavailable ? :error : (status == :ok ? :info : :warning)
         message =
           if status == :ok
             "Health recovered: readiness ok"
           else
-            "Health #{status}#{failed.empty? ? "" : ": #{failed.join(", ")}"}"
+            "Health #{status}#{named.empty? ? "" : ": #{named.join(", ")}"}"
           end
 
         # `failures` carries error_class + error_message. Redaction removed
@@ -136,6 +141,7 @@ module StandardHealth
             status: status.to_s,
             failed: (failed.empty? ? nil : failed),
             failures: (failures.empty? ? nil : failures),
+            failed_dependencies: (failed_dependencies.empty? ? nil : failed_dependencies),
             duration_ms: payload[:duration_ms]
           }.compact
         )

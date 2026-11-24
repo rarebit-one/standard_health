@@ -7,7 +7,8 @@ module StandardHealth
   #   {
   #     status:       :ok | :degraded | :unavailable,
   #     checks:       [...],   # readiness checks (optional) + aggregate-only checks
-  #     circuits:     [...],   # StandardCircuit.health_report[:circuits], when loaded
+  #     dependencies: [...],   # contributed dependency rows (0.10.0), when any gem contributes them
+  #     circuits:     [...],   # DEPRECATED: StandardCircuit.health_report[:circuits], when loaded
   #     generated_at: "..."
   #   }
   #
@@ -17,19 +18,31 @@ module StandardHealth
   # controller, owned once, so the host route and the controller can go.
   #
   # Status roll-up, in the estate's readiness vocabulary:
-  #   :unavailable (503) — a critical check failed, or a :critical circuit is RED
+  #   :unavailable (503) — a critical check failed, a :critical dependency is
+  #                        :unavailable, or (with no dependency rows) a
+  #                        :critical circuit is RED
   #   :degraded    (200) — a non-critical check failed, a check was skipped
-  #                        by the total budget, or the circuit roll-up is
+  #                        by the total budget, a dependency is :degraded, or
+  #                        (with no dependency rows) the circuit roll-up is
   #                        :degraded. A check that reports :skipped itself
   #                        (not applicable) is neutral — see Aggregator.
   #   :ok          (200) — otherwise
+  #
+  # DEPENDENCIES SUPERSEDE CIRCUITS. Once a gem contributes dependency rows
+  # (standard_circuit >= 0.8), the status rolls up from them and the
+  # `circuits` section no longer counts: both describe the same breakers, and
+  # counting both would report one red breaker twice. `circuits` is still
+  # rendered, deprecated, until 1.0. If reading the rows fails, the circuit
+  # roll-up counts again, so a broken reader cannot hide a red critical
+  # circuit. An app on standard_circuit 0.7 contributes no rows and gets the
+  # pre-0.10 body and status exactly.
   #
   # StandardCircuit's own word for its worst state is `:critical`; it is
   # translated to `:unavailable` here and never reaches the response.
   #
   # Never raises (see .claude/rules/never-raise.md): checks run through the
-  # Aggregator's safe_run, and a StandardCircuit that raises degrades the
-  # tier rather than 500ing it.
+  # Aggregator's safe_run, and a StandardCircuit or dependency reader that
+  # raises degrades the tier rather than 500ing it.
   module AggregateReport
     EVENT = "standard_health.aggregate.evaluated"
 
@@ -38,25 +51,40 @@ module StandardHealth
     module_function
 
     # @return [Hash] unredacted report; the controller redacts before render
-    def call(config: StandardHealth.config, now: Time.now.utc)
+    def call(config: StandardHealth.config, now: Time.now.utc, contributions: StandardHealth.contributions)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       registrations = config.aggregate_checks
       registrations = config.checks + registrations if config.aggregate_readiness_checks
       checks_result = Aggregator.call(checks: registrations, now: now, tier: :aggregate)
 
+      dependencies = config.aggregate_dependencies ? DependencyReport.call(contributions: contributions) : nil
       circuits = circuit_report(config)
-      status = roll_up(checks_result[:status], circuits && circuits[:status])
+      status = roll_up(checks_result[:status], dependencies && dependencies[:status],
+                       counted_circuit_status(circuits, dependencies))
 
       report = { status: status, checks: checks_result[:checks] }
+      if dependencies
+        report[:dependencies] = dependencies[:dependencies]
+        report[:dependencies_error] = dependencies[:error] if dependencies[:error]
+      end
       if circuits
         report[:circuits] = circuits[:circuits]
         report[:circuits_error] = circuits[:error] if circuits[:error]
       end
       report[:generated_at] = checks_result[:generated_at]
 
-      emit_evaluation(report, checks_result[:checks], circuits, started)
+      emit_evaluation(report, checks_result[:checks], circuits, dependencies, started)
       report
+    end
+
+    # The circuit fold-in's status, unless dependency rows were read: they
+    # describe the same breakers and win. See "DEPENDENCIES SUPERSEDE CIRCUITS".
+    def counted_circuit_status(circuits, dependencies)
+      return nil unless circuits
+      return nil if dependencies && !dependencies[:error]
+
+      circuits[:status]
     end
 
     # nil when circuits are off or StandardCircuit is not loaded — the key is
@@ -80,8 +108,8 @@ module StandardHealth
       }
     end
 
-    def roll_up(check_status, circuit_status)
-      statuses = [check_status, circuit_status].compact
+    def roll_up(*statuses)
+      statuses = statuses.compact
       return :unavailable if statuses.include?(:unavailable)
       return :degraded if statuses.include?(:degraded)
 
@@ -93,7 +121,7 @@ module StandardHealth
     # aggregate that includes soft checks would make it flap. The Logger
     # notifier logs this one (so redacted messages still reach logs); Sentry
     # and Metrics ignore it.
-    def emit_evaluation(report, rows, circuits, started)
+    def emit_evaluation(report, rows, circuits, dependencies, started)
       failing = Aggregator.failing_rows(rows)
       payload = {
         status: report[:status],
@@ -101,6 +129,14 @@ module StandardHealth
         failed: failing.map { |r| r[:name] },
         failures: Aggregator.failure_details(failing)
       }
+      if dependencies
+        payload[:dependencies_status] = dependencies[:status]
+        payload[:failing_dependencies] = DependencyReport.failing_names(dependencies[:dependencies])
+        if dependencies[:error]
+          payload[:dependencies_error_class] = dependencies[:error][:error_class]
+          payload[:dependencies_error_message] = dependencies[:error_message]
+        end
+      end
       if circuits
         payload[:circuits_status] = circuits[:status]
         payload[:red_circuits] = circuits[:circuits].select { |c| c[:color].to_s == "red" }.map { |c| c[:name] }
